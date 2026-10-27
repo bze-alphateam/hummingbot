@@ -65,4 +65,4 @@ class BeezeeOrderBookTests(unittest.TestCase):
         self.assertEqual(float(TradeType.BUY.value), message.content["trade_type"])
         self.assertEqual("trade-1", message.trade_id)
         self.assertEqual("2.5", message.content["price"])
-        self.assertEqual("1.0", message.content["amount"])
+        self.assertEqual("1.000000", message.content["amount"])

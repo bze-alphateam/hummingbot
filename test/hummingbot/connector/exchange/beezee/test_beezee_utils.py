@@ -100,7 +100,7 @@ class BeezeeUtilsTests(unittest.TestCase):
 
         self.assertEqual(Decimal("0.000004"), minimum_order_size_for_price("0.5", market))
         self.assertEqual(
-            Decimal("0.000000001"),
+            Decimal("0.0000000001"),
             market.min_price_increment,
         )
         self.assertEqual(CONSTANTS.DEFAULT_PRICE_SIG_DIGITS, 10)

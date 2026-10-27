@@ -55,7 +55,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         rule = rules[0]
         self.assertEqual("BZE-USDC", rule.trading_pair)
         self.assertEqual(Decimal("0.000001"), rule.min_order_size)
-        self.assertEqual(Decimal("0.000000001"), rule.min_price_increment)
+        self.assertEqual(Decimal("0.0000000001"), rule.min_price_increment)
         self.assertEqual(Decimal("0.000002"), rule.min_notional_size)
 
     async def test_update_balances_combines_bank_and_dust(self):
@@ -182,6 +182,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         data_source = Mock()
         data_source.get_market_by_trading_pair = AsyncMock(return_value=self.market)
         data_source.get_user_market_orders = AsyncMock(return_value=[])
+        data_source.candidate_order_ids = Mock(return_value=[])
         data_source.get_tx = AsyncMock(return_value={"tx_response": {"code": 0}})
         self.exchange._data_source = data_source
 
