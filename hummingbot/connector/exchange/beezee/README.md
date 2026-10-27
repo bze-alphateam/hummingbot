@@ -178,6 +178,10 @@ Notes:
   and ignore them.
 - Tradebin maker/taker fees come from `/bze/tradebin/params` (Coin objects on chain v8.2.0, `"1000ubze"` strings on older
   chains) and are converted with the fee denom's metadata exponent.
+- The chain charges the tradebin fee once per order, when the create tx runs (taker fee if an opposite order rests at
+  that exact price, else maker fee; cancels are free). The connector books it on the order's first fill only: taker fee
+  when that fill comes while the create is processed, else maker fee. An order that rests and never fills still paid
+  the maker fee, which Hummingbot cannot record without a fill.
 
 ## Halted markets
 
@@ -199,19 +203,29 @@ tags each queued message with a `message_id` (24 digits; reused once the queue i
 block) and puts it on every outcome event.
 
 - After a broadcast the connector polls `GET /cosmos/tx/v1beta1/txs/{hash}` (1 s, 2 s, 3 s, then every 3 s, at most
-  60 s). The i-th `OrderCreateMessageEvent` of the account maps to the i-th create message of the tx. A tx that is not
-  found in time fails the order (create) or leaves it open (cancel).
+  60 s). The i-th `OrderCreateMessageEvent` of the account maps to the i-th create message of the tx. Only the node's
+  "not found" answer counts toward the 60 s; a failed request is retried on the next status poll without failing
+  anything. A cancel tx not found in time leaves the order open. A create tx not found in time takes an order of the
+  account on the book with the same market, side, amount and price that no tracked order claims, else it fails.
 - It then reads RPC `/block_results` from the tx height on, at most 20 blocks, for that `message_id` with the order's
   market and side: `OrderExecutedEvent` with the account as taker is a fill, `OrderSavedEvent` gives the order id and
   rests the order, `OrderCanceledEvent` confirms a cancel. A tx event that reuses the same id at a later height proves
   the message was already processed.
+- Outcomes: saved → `OPEN` (`PARTIALLY_FILLED` with taker fills first); taker fills covering the amount and no save →
+  `FILLED`. Taker fills short of the amount and no save means the chain refunded the rest: the order ends `CANCELED`
+  with those fills, not `FILLED`.
 - Every block (websocket `NewBlock`, with the status poll as fallback) is read once in order, missed heights included.
   An `OrderExecutedEvent` whose `id` is one of the account's resting orders is a maker fill of that order.
+- A block that fails to load 3 times in a row (pruned or refused by the node) is skipped with a warning. Creates and
+  cancels whose outcome block it was are settled from the order book, and resting orders take their fills through
+  that block from the chain state at that height.
 - A cancel with no event within 20 blocks: the order is checked against `user_market_orders`. Gone means it was filled
   first (`FILLED` when the fills cover it, else `CANCELED`); still there means the cancel did not take effect.
 - The block cursor and the queued messages are saved with the order states. After a restart the connector resumes
   queued creates from their tx, checks resting orders against `user_market_orders` and reads back missed fills, up to
-  1000 blocks; beyond that it records the difference as one fill at the order price, with a warning.
+  1000 blocks. It never reads further back. Beyond that, queued creates and cancels are settled from the order book.
+  A resting order still on the book gets the amount it lost as one fill at the order price. An order gone from the
+  book has an unknown history, so it is closed as `CANCELED` without a fill. Each case logs a warning.
 
 ## Safe/dev workflow
 

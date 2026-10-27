@@ -256,7 +256,6 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
     async def test_halt_cancel_is_retried_once_the_exchange_order_id_resolves(self):
         data_source = self._halt_data_source([{"ubze"}, {"ubze"}])
         data_source.broadcast_cancel_order = AsyncMock(return_value={"tx_response": {"code": 0, "txhash": "CA" * 32}})
-        self.exchange._request_order_status = AsyncMock(return_value=Mock(exchange_order_id=None))
         self._track_order("OID-QUEUED")
 
         await self._force_halted_denoms_refresh()

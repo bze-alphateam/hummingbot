@@ -64,7 +64,8 @@ class QueuedOrderMessage:
         return self.tx_height + CONSTANTS.ORDER_OUTCOME_BLOCK_WINDOW - 1
 
     def in_window(self, height: int) -> bool:
-        return self.tx_height is not None and self.next_height <= height <= self.last_height
+        # Blocks are taken one at a time from next_height on, so a message never jumps over its outcome block.
+        return self.tx_height is not None and height == self.next_height and height <= self.last_height
 
     def to_json(self) -> Dict[str, Any]:
         return asdict(self)
@@ -137,6 +138,9 @@ class BeezeeExchange(ExchangePyBase):
         self._block_processing_lock = asyncio.Lock()
         # Resting orders restored from a saved state, checked against UserMarketOrders once fills are caught up.
         self._orders_to_verify: Set[str] = set()
+        # Orders whose fills up to a height were taken from the chain state instead of block events.
+        self._fills_counted_through: Dict[str, int] = {}
+        self._block_read_failures: Dict[int, int] = {}
         self._last_status_log_timestamp = 0.0
 
         super().__init__(balance_asset_limit=balance_asset_limit, rate_limits_share_pct=rate_limits_share_pct)
@@ -498,6 +502,7 @@ class BeezeeExchange(ExchangePyBase):
             "last_processed_height": self._last_processed_height,
             "creates": {client_order_id: message.to_json() for client_order_id, message in self._queued_creates.items()},
             "cancels": {client_order_id: message.to_json() for client_order_id, message in self._queued_cancels.items()},
+            "fills_counted_through": dict(self._fills_counted_through),
         }
         return states
 
@@ -508,6 +513,7 @@ class BeezeeExchange(ExchangePyBase):
         self._last_processed_height = block_state.get("last_processed_height")
         saved_creates = block_state.get("creates") or {}
         saved_cancels = block_state.get("cancels") or {}
+        self._fills_counted_through = dict(block_state.get("fills_counted_through") or {})
         for order in self.in_flight_orders.values():
             client_order_id = order.client_order_id
             exchange_order_id = order.exchange_order_id or ""
@@ -544,12 +550,13 @@ class BeezeeExchange(ExchangePyBase):
                 await self._sleep(delay)
                 if self._queued_messages(is_cancel).get(message.client_order_id) is not message:
                     return
+                # None only when the node answers "not found": a failed request raises and is retried later.
                 tx = await data_source.get_tx(message.tx_hash)
                 tx_response = (tx or {}).get("tx_response")
                 if tx_response:
                     await self._on_tx_found(message, is_cancel, tx_response)
                     return
-            self._on_tx_not_found(message, is_cancel)
+            await self._on_tx_not_found(message, is_cancel)
         except asyncio.CancelledError:
             raise
         except Exception as error:
@@ -558,24 +565,19 @@ class BeezeeExchange(ExchangePyBase):
                 f"Retrying on the next status update. Error: {error}"
             )
 
-    def _on_tx_not_found(self, message: QueuedOrderMessage, is_cancel: bool):
-        self._queued_messages(is_cancel).pop(message.client_order_id, None)
-        order = self._order_tracker.fetch_tracked_order(message.client_order_id)
-        if order is None:
-            return
+    async def _on_tx_not_found(self, message: QueuedOrderMessage, is_cancel: bool):
         waited = int(sum(CONSTANTS.TX_LOOKUP_DELAYS))
         if is_cancel:
-            self.logger().warning(
-                f"Beezee cancel tx {message.tx_hash} was not found within {waited} s. The order stays open. "
-                f"client_order_id={message.client_order_id}"
-            )
-            self._update_order_state(order, self._open_state(order))
+            self._queued_cancels.pop(message.client_order_id, None)
+            order = self._order_tracker.fetch_tracked_order(message.client_order_id)
+            if order is not None:
+                self.logger().warning(
+                    f"Beezee cancel tx {message.tx_hash} was not found within {waited} s. The order stays open. "
+                    f"client_order_id={message.client_order_id}"
+                )
+                self._update_order_state(order, self._open_state(order))
         else:
-            self.logger().warning(
-                f"Beezee create tx {message.tx_hash} was not found within {waited} s. Marking the order failed. "
-                f"client_order_id={message.client_order_id}"
-            )
-            self._update_order_state(order, OrderState.FAILED)
+            await self._settle_create_from_book(message, f"its tx was not found within {waited} s")
 
     async def _on_tx_found(self, message: QueuedOrderMessage, is_cancel: bool, tx_response: Dict[str, Any]):
         order = self._order_tracker.fetch_tracked_order(message.client_order_id)
@@ -625,9 +627,11 @@ class BeezeeExchange(ExchangePyBase):
             )
             self._update_order_state(order, self._open_state(order) if is_cancel else OrderState.FAILED)
             return
-        message.tx_height = int(tx_response["height"])
-        message.message_id = event.get("message_id")
-        message.next_height = message.tx_height
+        # Under the lock, so a pass already past the tx height cannot take this message in mid-way.
+        async with self._block_processing_lock:
+            message.tx_height = int(tx_response["height"])
+            message.message_id = event.get("message_id")
+            message.next_height = message.tx_height
         await self._process_blocks()
 
     async def _create_message_event(
@@ -688,17 +692,60 @@ class BeezeeExchange(ExchangePyBase):
                     f"Beezee fills were not read for {latest_height - self._last_processed_height} blocks "
                     f"(more than {CONSTANTS.MAX_BLOCK_CATCH_UP}). Reconciling resting orders from the chain instead."
                 )
-                self._last_processed_height = latest_height
                 await self._reconcile_resting_orders(latest_height)
+                self._last_processed_height = latest_height
+            # Never read further back than the catch-up limit: older messages are settled from the order book.
+            floor_height = latest_height - CONSTANTS.MAX_BLOCK_CATCH_UP
+            behind = f"its blocks are more than {CONSTANTS.MAX_BLOCK_CATCH_UP} behind the chain"
+            for message in list(self._queued_creates.values()):
+                if message.tx_height is not None and message.next_height <= floor_height:
+                    await self._settle_create_from_book(message, behind)
+            for message in list(self._queued_cancels.values()):
+                if message.tx_height is not None and message.next_height <= floor_height:
+                    await self._finish_cancel_without_outcome(message, behind)
             start_height = self._last_processed_height + 1
             for message in list(self._queued_creates.values()) + list(self._queued_cancels.values()):
                 if message.tx_height is not None:
                     start_height = min(start_height, message.next_height)
             for height in range(start_height, latest_height + 1):
-                await self._apply_block_events(height, await self._block_events(height))
+                events = await self._read_block_events(height)
+                if events is None:
+                    await self._skip_unreadable_block(height, latest_height)
+                    events = []
+                await self._apply_block_events(height, events)
                 self._last_processed_height = max(self._last_processed_height, height)
             await self._expire_queued_messages()
             await self._verify_restored_orders()
+
+    async def _read_block_events(self, height: int) -> Optional[List[TradebinEvent]]:
+        """The block's tradebin events, or None once the block failed to load MAX_BLOCK_READ_ATTEMPTS times."""
+        try:
+            events = await self._block_events(height)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            failures = self._block_read_failures.get(height, 0) + 1
+            if failures < CONSTANTS.MAX_BLOCK_READ_ATTEMPTS:
+                self._block_read_failures[height] = failures
+                raise
+            self._block_read_failures.pop(height, None)
+            self.logger().warning(
+                f"Beezee block {height} could not be read {failures} times ({error}). Skipping it and settling the "
+                f"orders it could affect from the chain state."
+            )
+            return None
+        self._block_read_failures.pop(height, None)
+        return events
+
+    async def _skip_unreadable_block(self, height: int, latest_height: int):
+        reason = f"block {height} could not be read"
+        for message in [message for message in self._queued_creates.values() if message.in_window(height)]:
+            await self._settle_create_from_book(message, reason)
+        for message in [message for message in self._queued_cancels.values() if message.in_window(height)]:
+            await self._finish_cancel_without_outcome(message, reason)
+        # The chain state right after the skipped block has the resting orders' exact fills through it; the next
+        # blocks are then read as usual. A node that pruned that state too is read at the latest height instead.
+        await self._reconcile_resting_orders(height, fallback_height=latest_height)
 
     async def _block_events(self, height: int) -> List[TradebinEvent]:
         events = self._block_events_cache.get(height)
@@ -744,13 +791,13 @@ class BeezeeExchange(ExchangePyBase):
                     # The event's order_type is the side of the resting (maker) order.
                     resting_order = resting.get(event.get("id"))
                     if event.get("maker") == self._account_address and resting_order is not None:
-                        self._process_fill(resting_order, market, event, f"{height}-{index}-maker", is_taker=False)
+                        self._process_fill(resting_order, market, event, height, f"{height}-{index}-maker", is_taker=False)
                         maker_filled.add(resting_order.client_order_id)
                     if event.get("taker") == self._account_address:
                         message = self._match_create(creates, market_ids, event, self._opposite_side(event.get("order_type")))
                         if message is not None:
                             order = self._order_tracker.fetch_order(message.client_order_id)
-                            self._process_fill(order, market, event, f"{height}-{index}-taker", is_taker=True)
+                            self._process_fill(order, market, event, height, f"{height}-{index}-taker", is_taker=True)
                             outcomes.setdefault(message.client_order_id, None)
                 elif event.type == CONSTANTS.ORDER_SAVED_EVENT and event.get("owner") == self._account_address:
                     message = self._match_create(creates, market_ids, event, event.get("order_type"))
@@ -779,7 +826,7 @@ class BeezeeExchange(ExchangePyBase):
                 elif self._queued_cancels.get(message.client_order_id) is message:
                     await self._finish_cancel_without_outcome(message, f"its message id was reused at height {height}")
         for message in creates + cancels:
-            if message.next_height <= height:
+            if message.next_height == height:
                 message.next_height = height + 1
 
     def _match_create(
@@ -837,7 +884,11 @@ class BeezeeExchange(ExchangePyBase):
             )
         self._update_order_state(order, state)
 
-    def _process_fill(self, order: InFlightOrder, market: BeezeeMarket, event: TradebinEvent, trade_id: str, is_taker: bool):
+    def _process_fill(
+        self, order: InFlightOrder, market: BeezeeMarket, event: TradebinEvent, height: int, trade_id: str, is_taker: bool
+    ):
+        if height <= self._fills_counted_through.get(order.client_order_id, -1):
+            return
         amount = chain_amount_to_display(event.get("amount"), market.base)
         price = chain_price_to_display(event.get("price"), market)
         self._order_tracker.process_trade_update(
@@ -850,12 +901,20 @@ class BeezeeExchange(ExchangePyBase):
                 fill_price=price,
                 fill_base_amount=amount,
                 fill_quote_amount=amount * price,
-                fee=self.get_fee(
-                    market.base.symbol, market.quote.symbol, order.order_type, order.trade_type, amount, price,
-                    is_maker=not is_taker,
-                ),
+                fee=self._fill_fee(order, market, amount, price, is_taker),
                 is_taker=is_taker,
             )
+        )
+
+    def _fill_fee(self, order: InFlightOrder, market: BeezeeMarket, amount: Decimal, price: Decimal, is_taker: bool):
+        """The tradebin fee is a flat amount charged once per create message, at tx time, so it goes on the order's
+        first fill only. The chain charges the taker fee when an opposite order rests at that exact price, else the
+        maker fee; a first fill taken while the create is processed counts as taker, any other as maker."""
+        if order.order_fills:
+            return AddedToCostTradeFee(flat_fees=[])
+        return self.get_fee(
+            market.base.symbol, market.quote.symbol, order.order_type, order.trade_type, amount, price,
+            is_maker=not is_taker,
         )
 
     async def _expire_queued_messages(self):
@@ -876,6 +935,42 @@ class BeezeeExchange(ExchangePyBase):
         order = self._order_tracker.fetch_tracked_order(message.client_order_id)
         if order is not None:
             self._update_order_state(order, OrderState.FAILED)
+
+    async def _settle_create_from_book(self, message: QueuedOrderMessage, reason: str):
+        """Settles a create whose outcome cannot be read from blocks: it rests if the book holds an order of ours with
+        its market, side, amount and price that no tracked order claims, else it fails."""
+        self._queued_creates.pop(message.client_order_id, None)
+        order = self._order_tracker.fetch_tracked_order(message.client_order_id)
+        if order is None:
+            return
+        order_id = await self._unclaimed_order_on_book(order)
+        if order_id is None:
+            await self._finish_create_without_outcome(message, reason)
+            return
+        self.logger().warning(
+            f"Beezee order {message.client_order_id}: {reason}, but a matching order of this account rests on the "
+            f"book. Taking it as this order. exchange_order_id={order_id}, tx_hash={message.tx_hash}"
+        )
+        order.update_exchange_order_id(order_id)
+        self._update_order_state(order, self._open_state(order))
+
+    async def _unclaimed_order_on_book(self, order: InFlightOrder) -> Optional[str]:
+        data_source = self._build_data_source()
+        market = await data_source.get_market_by_trading_pair(order.trading_pair)
+        side = self._side(order.trade_type)
+        claimed = {tracked.exchange_order_id for tracked in self._order_tracker.all_fillable_orders.values()}
+        for open_order in await data_source.get_user_market_orders(market.market_id):
+            order_id = open_order.get("id")
+            if order_id in claimed or open_order.get("order_type", side) != side:
+                continue
+            chain_order = await data_source.get_market_order(market.market_id, side, order_id)
+            if (
+                chain_order is not None
+                and chain_amount_to_display(chain_order["amount"], market.base) == order.amount
+                and chain_price_to_display(chain_order["price"], market) == order.price
+            ):
+                return order_id
+        return None
 
     async def _finish_cancel_without_outcome(self, message: QueuedOrderMessage, reason: str):
         self._queued_cancels.pop(message.client_order_id, None)
@@ -900,44 +995,61 @@ class BeezeeExchange(ExchangePyBase):
                 continue
             self._order_tracker.process_order_update(await self._request_order_status(order))
 
-    async def _reconcile_resting_orders(self, height: int):
+    async def _reconcile_resting_orders(self, height: int, fallback_height: Optional[int] = None):
+        """Takes the resting orders' fills up to `height` from the chain state, for when their block events are lost.
+
+        An order still on the book gets the amount it lost as one fill at the order price; its block fills up to
+        `height` are then ignored. An order gone from the book has an unknown history (filled, or cancelled from
+        elsewhere), so no fill is invented: it is checked against the book and ends CANCELED unless its fills cover it.
+        """
         data_source = self._build_data_source()
         for order in list(self.in_flight_orders.values()):
             if len(order.exchange_order_id or "") != CONSTANTS.ORDER_ID_LENGTH:
                 continue
             market = await data_source.get_market_by_trading_pair(order.trading_pair)
-            remaining = Decimal("0")
-            if await self._is_on_book(order):
+            side = self._side(order.trade_type)
+            read_height = height
+            try:
                 chain_order = await data_source.get_market_order(
-                    market.market_id, self._side(order.trade_type), order.exchange_order_id
+                    market.market_id, side, order.exchange_order_id, height=height
                 )
-                if chain_order is None:
-                    continue
-                remaining = chain_amount_to_display(chain_order["amount"], market.base)
-            missed_fill = order.amount - remaining - order.executed_amount_base
-            if missed_fill > Decimal("0"):
-                self.logger().warning(
-                    f"Beezee order {order.client_order_id} lost {missed_fill} while fills were not read. "
-                    f"Recording it as one fill at the order price."
+            except Exception:
+                if fallback_height is None:
+                    raise
+                read_height = fallback_height
+                chain_order = await data_source.get_market_order(
+                    market.market_id, side, order.exchange_order_id, height=fallback_height
                 )
-                self._order_tracker.process_trade_update(
-                    TradeUpdate(
-                        trade_id=f"reconcile-{height}",
-                        client_order_id=order.client_order_id,
-                        exchange_order_id=order.exchange_order_id,
-                        trading_pair=order.trading_pair,
-                        fill_timestamp=self.current_timestamp,
-                        fill_price=order.price,
-                        fill_base_amount=missed_fill,
-                        fill_quote_amount=missed_fill * order.price,
-                        fee=self.get_fee(
-                            market.base.symbol, market.quote.symbol, order.order_type, order.trade_type,
-                            missed_fill, order.price, is_maker=True,
-                        ),
-                        is_taker=False,
-                    )
-                )
+            self._fills_counted_through[order.client_order_id] = read_height
             self._orders_to_verify.add(order.client_order_id)
+            if chain_order is None:
+                if order.executed_amount_base < order.amount:
+                    self.logger().warning(
+                        f"Beezee order {order.client_order_id} left the book while its fills were not read. "
+                        f"Its fills are unknown, so it is closed as cancelled without a fill."
+                    )
+                continue
+            missed_fill = order.amount - chain_amount_to_display(chain_order["amount"], market.base) - order.executed_amount_base
+            if missed_fill <= Decimal("0"):
+                continue
+            self.logger().warning(
+                f"Beezee order {order.client_order_id} lost {missed_fill} while fills were not read. "
+                f"Recording it as one fill at the order price."
+            )
+            self._order_tracker.process_trade_update(
+                TradeUpdate(
+                    trade_id=f"reconcile-{read_height}",
+                    client_order_id=order.client_order_id,
+                    exchange_order_id=order.exchange_order_id,
+                    trading_pair=order.trading_pair,
+                    fill_timestamp=self.current_timestamp,
+                    fill_price=order.price,
+                    fill_base_amount=missed_fill,
+                    fill_quote_amount=missed_fill * order.price,
+                    fee=self._fill_fee(order, market, missed_fill, order.price, is_taker=False),
+                    is_taker=False,
+                )
+            )
 
     async def _is_on_book(self, order: InFlightOrder) -> bool:
         data_source = self._build_data_source()

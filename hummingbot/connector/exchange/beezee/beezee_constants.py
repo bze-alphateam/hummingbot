@@ -60,6 +60,8 @@ ORDER_OUTCOME_BLOCK_WINDOW = 20
 TX_LOOKUP_DELAYS = (1.0, 2.0, 3.0) + (3.0,) * 18
 # Fills missed while the bot was down are read back from at most this many blocks.
 MAX_BLOCK_CATCH_UP = 1000
+# A block whose results cannot be read this many times in a row is skipped (pruned or refused by the node).
+MAX_BLOCK_READ_ATTEMPTS = 3
 BLOCK_EVENTS_CACHE_SIZE = 64
 # Reserved tracking-states key holding the block cursor and the in-flight tx messages.
 TRACKING_STATE_KEY = "__beezee_block_tracking__"

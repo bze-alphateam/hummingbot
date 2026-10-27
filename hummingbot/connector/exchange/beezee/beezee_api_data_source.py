@@ -62,6 +62,17 @@ class BeezeeTxRefusedError(IOError):
         return is_denom_halted_error(self.code, self.codespace, self.chain_message)
 
 
+def is_not_found_error(error: Exception) -> bool:
+    """True for the node's explicit "not found" answer (HTTP 404), not for a failed request."""
+    message = str(error).lower()
+    return "http status is 404" in message or "not found" in message
+
+
+def height_header(height: Optional[int]) -> Optional[Dict[str, str]]:
+    """Header that runs a REST query against the state at a past height."""
+    return None if height is None else {"x-cosmos-block-height": str(height)}
+
+
 def is_denom_halted_error(code: Optional[int], codespace: Optional[str], message: Optional[str]) -> bool:
     if code == CONSTANTS.DENOM_HALTED_ERROR_CODE and codespace == CONSTANTS.TRADEBIN_CODESPACE:
         return True
@@ -112,7 +123,7 @@ class BeezeeAPIDataSource:
     def account_address(self) -> Optional[str]:
         return self._account_address
 
-    async def _request(self, path_url: str, params: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None, method: RESTMethod = RESTMethod.GET, limit_id: Optional[str] = None, return_err: bool = False) -> Dict[str, Any]:
+    async def _request(self, path_url: str, params: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None, method: RESTMethod = RESTMethod.GET, limit_id: Optional[str] = None, return_err: bool = False, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         rest_assistant = await self._api_factory.get_rest_assistant()
         throttler_limit_id = limit_id or path_url
         if throttler_limit_id not in self._known_limit_ids:
@@ -124,6 +135,7 @@ class BeezeeAPIDataSource:
             method=method,
             throttler_limit_id=throttler_limit_id,
             return_err=return_err,
+            headers=headers,
         )
 
     async def _rpc_request(self, path_url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -147,7 +159,7 @@ class BeezeeAPIDataSource:
     async def get_block_results(self, height: int) -> Dict[str, Any]:
         return await self._rpc_request(CONSTANTS.BLOCK_RESULTS_PATH_URL, params={"height": height})
 
-    async def _paged_request(self, path_url: str, item_key: str, params: Optional[Dict[str, Any]] = None, page_limit: int = CONSTANTS.DEFAULT_MARKET_PAGE_SIZE) -> List[Dict[str, Any]]:
+    async def _paged_request(self, path_url: str, item_key: str, params: Optional[Dict[str, Any]] = None, page_limit: int = CONSTANTS.DEFAULT_MARKET_PAGE_SIZE, headers: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
         next_key: Optional[str] = None
         while True:
@@ -155,7 +167,7 @@ class BeezeeAPIDataSource:
             page_params["pagination.limit"] = page_limit
             if next_key:
                 page_params["pagination.key"] = next_key
-            response = await self._request(path_url=path_url, params=page_params)
+            response = await self._request(path_url=path_url, params=page_params, headers=headers)
             items.extend(response.get(item_key, []))
             next_key = (response.get("pagination") or {}).get("next_key")
             if not next_key:
@@ -318,23 +330,36 @@ class BeezeeAPIDataSource:
             self._cached_account_number = None
             self._next_account_sequence = None
 
-    async def get_user_market_orders(self, market_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def get_user_market_orders(self, market_id: Optional[str] = None, height: Optional[int] = None) -> List[Dict[str, Any]]:
         if self._account_address is None:
             return []
         params = {"market": market_id} if market_id else None
-        return await self._paged_request(f"/bze/tradebin/user_market_orders/{self._account_address}", "list", params=params)
+        return await self._paged_request(
+            f"/bze/tradebin/user_market_orders/{self._account_address}", "list", params=params, headers=height_header(height)
+        )
 
-    async def get_market_order(self, market_id: str, order_type: str, order_id: str) -> Optional[Dict[str, Any]]:
+    async def get_market_order(self, market_id: str, order_type: str, order_id: str, height: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """The order on the book, or None when the chain says it is not there. Other errors raise."""
         try:
-            return (await self._request(CONSTANTS.MARKET_ORDER_PATH_URL, params={"market": market_id, "order_type": order_type, "order_id": order_id})).get("order")
-        except Exception:
-            return None
+            response = await self._request(
+                CONSTANTS.MARKET_ORDER_PATH_URL,
+                params={"market": market_id, "order_type": order_type, "order_id": order_id},
+                headers=height_header(height),
+            )
+        except IOError as error:
+            if is_not_found_error(error):
+                return None
+            raise
+        return response.get("order")
 
     async def get_tx(self, tx_hash: str) -> Optional[Dict[str, Any]]:
+        """The tx, or None when the node does not know it (yet). Other errors raise."""
         try:
             return await self._request(f"{CONSTANTS.GET_TX_PATH_URL}/{tx_hash}")
-        except Exception:
-            return None
+        except IOError as error:
+            if is_not_found_error(error):
+                return None
+            raise
 
     async def simulate_gas(self, messages: List[bytes], sequence: int, memo: str = "") -> int:
         if self._signer is None:
