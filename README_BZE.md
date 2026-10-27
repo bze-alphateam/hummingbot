@@ -86,5 +86,6 @@ Use a dedicated trading wallet that holds only the funds the bot should trade wi
 - **Trading fees.** The tradebin maker/taker fees (flat amounts, in ubze on mainnet) are read from the chain params
   and added to every order's fee estimate, so PnL and profitability checks include them.
 - **Halted markets.** A market whose base or quote denom is halted by governance is exit-only: the connector refuses
-  new orders on it, cancels its open orders once when the halt starts, and trades again once the halt is lifted. The
-  halted list is read at start and every 60 s, and a tx refused with `denom is halted` takes effect at once.
+  new orders on it, cancels its open orders (and keeps cancelling any still open while the halt lasts), and trades
+  again once the halt is lifted. The halted list is read at start and every 60 s, and a tx refused with
+  `denom is halted` takes effect at once.

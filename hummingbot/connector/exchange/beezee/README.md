@@ -169,7 +169,8 @@ Notes:
 - Before every broadcast the connector simulates the tx (`/cosmos/tx/v1beta1/simulate`). The gas limit is
   `ceil(gas_used * gas_adjustment)` and the fee is `ceil(gas_limit * gas_price)` in the native denom.
 - A tx whose simulation fails is never broadcast; the order fails with the chain's message. An account sequence
-  mismatch resets the cached sequence and retries once.
+  mismatch resets the cached sequence and retries once. Txs are sent one at a time from sequence reservation to
+  broadcast, so orders placed together (a bid and an ask) get consecutive sequences.
 - `gas_price` defaults to `0.01` (ubze per gas unit), `gas_adjustment` to `1.3`. Raise `gas_price` if your node
   requires a higher minimum.
 - The old `create_order_gas_limit` / `cancel_order_gas_limit` settings are gone; saved configs that still have them load
@@ -184,7 +185,9 @@ new orders do not.
 
 - The connector reads `/bze/tradebin/halted_denoms` at start and every 60 s.
 - An order on a halted market is refused before signing.
-- When a tracked market becomes halted, its open orders are cancelled once and one warning is logged.
+- When a tracked market becomes halted, one warning is logged and its open orders are cancelled. While the market
+  stays halted, every status poll re-issues the cancel for orders that are still open and have no cancel in flight
+  (an order whose id was not known yet, a cancel that failed, or a create queued before the halt that executed).
 - A tx refused with tradebin code 4017 (`denom is halted`) marks the market halted at once.
 - When the denom is no longer halted, the connector logs it once and trades again.
 

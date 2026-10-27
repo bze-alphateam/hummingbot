@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import quote
 
+from aiohttp import ContentTypeError
 from bidict import bidict
 
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
@@ -95,6 +96,9 @@ class BeezeeAPIDataSource:
         self._known_limit_ids = {rate_limit.limit_id for rate_limit in CONSTANTS.RATE_LIMITS}
         self._warned_missing_metadata_denoms: Set[str] = set()
         self._account_info_lock = asyncio.Lock()
+        # One tx at a time from sequence reservation to broadcast: the node only sees sequence N+1 as valid
+        # once the tx with N is in its check state, so a concurrent simulation with N+1 would be refused.
+        self._tx_lock = asyncio.Lock()
         self._cached_account_number: Optional[int] = None
         self._next_account_sequence: Optional[int] = None
 
@@ -313,12 +317,18 @@ class BeezeeAPIDataSource:
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required to simulate transactions.")
         tx_bytes = build_simulation_transaction(self._signer.public_key_bytes, sequence, messages, memo=memo)
-        response = await self._request(
-            CONSTANTS.SIMULATE_TX_PATH_URL,
-            method=RESTMethod.POST,
-            data=build_simulate_request(tx_bytes),
-            return_err=True,
-        )
+        try:
+            response = await self._request(
+                CONSTANTS.SIMULATE_TX_PATH_URL,
+                method=RESTMethod.POST,
+                data=build_simulate_request(tx_bytes),
+                return_err=True,
+            )
+        except ContentTypeError as error:
+            raise BeezeeTxRefusedError("simulation", f"unexpected non-JSON response: {error}") from error
+        if not isinstance(response, dict):
+            # e.g. a 502/504 HTML or text page from a proxy in front of the node
+            raise BeezeeTxRefusedError("simulation", f"unexpected non-JSON response: {str(response)[:200]}")
         gas_used = (response.get("gas_info") or {}).get("gas_used")
         if gas_used is None:
             raise BeezeeTxRefusedError("simulation", str(response.get("message") or response))
@@ -329,44 +339,58 @@ class BeezeeAPIDataSource:
 
         gas limit = ceil(gas_used * gas_adjustment), fee = ceil(gas limit * gas_price) in the native denom.
         A refused simulation is never broadcast. An account sequence mismatch, in simulation or at broadcast,
-        resets the cached sequence and retries once; any other refusal raises BeezeeTxRefusedError.
+        resets the cached sequence and retries once; any other refusal raises BeezeeTxRefusedError. Any failure
+        before the broadcast resets the cached sequence. Calls are serialized from sequence reservation to
+        broadcast, so concurrent orders get consecutive sequences.
         """
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required to sign transactions.")
-        for attempt in range(2):
-            account = await self.reserve_account_info_sequence()
-            try:
-                gas_used = await self.simulate_gas(messages, account.sequence, memo=memo)
-                gas_limit = gas_limit_from_simulation(gas_used, self._gas_adjustment)
-                tx_bytes = build_signed_transaction(
-                    signer=self._signer,
-                    chain_id=self._chain_id,
-                    account_number=account.account_number,
-                    sequence=account.sequence,
-                    messages=messages,
-                    fee_denom=self._native_denom,
-                    fee_amount=fee_amount_from_gas(gas_limit, self._gas_price),
-                    gas_limit=gas_limit,
-                    memo=memo,
-                )
+        async with self._tx_lock:
+            for attempt in range(2):
+                account = await self.reserve_account_info_sequence()
+                try:
+                    tx_bytes = await self._simulate_and_sign(messages, account, memo)
+                except BeezeeTxRefusedError as error:
+                    await self.reset_account_sequence()
+                    if error.is_sequence_mismatch and attempt == 0:
+                        continue
+                    raise
+                except Exception:
+                    # Nothing was broadcast, so the reserved sequence is unused on chain.
+                    await self.reset_account_sequence()
+                    raise
                 response = await self._request(CONSTANTS.BROADCAST_TX_PATH_URL, method=RESTMethod.POST, data=build_broadcast_request(tx_bytes))
                 tx_response = response.get("tx_response", {})
                 code = int(tx_response.get("code", 0))
-                if code != 0:
-                    raise BeezeeTxRefusedError(
-                        "broadcast",
-                        tx_response.get("raw_log") or str(tx_response),
-                        code=code,
-                        codespace=tx_response.get("codespace"),
-                    )
-                return response
-            except BeezeeTxRefusedError as error:
-                # The reserved sequence was not used on chain, so the cached one is stale either way.
+                if code == 0:
+                    return response
+                # Refused at CheckTx: the reserved sequence was not used on chain.
                 await self.reset_account_sequence()
+                error = BeezeeTxRefusedError(
+                    "broadcast",
+                    tx_response.get("raw_log") or str(tx_response),
+                    code=code,
+                    codespace=tx_response.get("codespace"),
+                )
                 if error.is_sequence_mismatch and attempt == 0:
                     continue
-                raise
-        raise RuntimeError("Beezee tx retry loop exited without a result.")
+                raise error
+            raise RuntimeError("Beezee tx retry loop exited without a result.")
+
+    async def _simulate_and_sign(self, messages: List[bytes], account: BeezeeAccountInfo, memo: str) -> bytes:
+        gas_used = await self.simulate_gas(messages, account.sequence, memo=memo)
+        gas_limit = gas_limit_from_simulation(gas_used, self._gas_adjustment)
+        return build_signed_transaction(
+            signer=self._signer,
+            chain_id=self._chain_id,
+            account_number=account.account_number,
+            sequence=account.sequence,
+            messages=messages,
+            fee_denom=self._native_denom,
+            fee_amount=fee_amount_from_gas(gas_limit, self._gas_price),
+            gas_limit=gas_limit,
+            memo=memo,
+        )
 
     async def broadcast_create_order(self, market: BeezeeMarket, order_type: str, amount: Decimal, price: Decimal, memo: str = "") -> Dict[str, Any]:
         if self._signer is None:
