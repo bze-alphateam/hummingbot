@@ -1,3 +1,4 @@
+import asyncio
 import time
 from collections import defaultdict
 from decimal import Decimal
@@ -5,7 +6,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hummingbot.connector.constants import s_decimal_NaN
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS, beezee_web_utils as web_utils
-from hummingbot.connector.exchange.beezee.beezee_api_data_source import BeezeeAPIDataSource
+from hummingbot.connector.exchange.beezee.beezee_api_data_source import (
+    BeezeeAPIDataSource,
+    BeezeeTxRefusedError,
+    is_denom_halted_error,
+)
 from hummingbot.connector.exchange.beezee.beezee_api_order_book_data_source import BeezeeAPIOrderBookDataSource
 from hummingbot.connector.exchange.beezee.beezee_api_user_stream_data_source import BeezeeAPIUserStreamDataSource
 from hummingbot.connector.exchange.beezee.beezee_auth import BeezeeAuth
@@ -76,9 +81,16 @@ class BeezeeExchange(ExchangePyBase):
         self._chain_id = network.chain_id
         self._native_denom = network.native_denom
         self._gas_price = network.gas_price
+        self._gas_adjustment = network.gas_adjustment
 
         self._data_source: Optional[BeezeeAPIDataSource] = None
-        self._tradebin_params: Dict[str, Any] = {}
+        self._trade_fees: Dict[str, Optional[TokenAmount]] = {}
+        self._halted_denoms: Set[str] = set()
+        self._halted_denoms_loaded = False
+        self._last_halted_denoms_refresh = 0.0
+        # Markets the chain refused as halted although the last halted-denoms read did not list their denoms.
+        self._refused_halted_market_ids: Set[str] = set()
+        self._halted_trading_pairs: Dict[str, str] = {}
         self._creation_tx_hashes: Dict[str, str] = {}
         self._cancel_tx_hashes: Dict[str, str] = {}
         self._pre_create_order_ids: Dict[str, Set[str]] = {}
@@ -183,6 +195,7 @@ class BeezeeExchange(ExchangePyBase):
                 gas_price=self._gas_price,
                 account_address=self._account_address,
                 signer=self._signer,
+                gas_adjustment=self._gas_adjustment,
             )
         return self._data_source
 
@@ -210,15 +223,9 @@ class BeezeeExchange(ExchangePyBase):
         price: Decimal = s_decimal_NaN,
         is_maker: Optional[bool] = None,
     ) -> TradeFeeBase:
-        params = self._tradebin_params or {}
-        raw_fee = params.get("market_maker_fee" if is_maker else "market_taker_fee", f"0{self._native_denom}")
-        flat_fees: List[TokenAmount] = []
-        if raw_fee.endswith(self._native_denom):
-            raw_amount = raw_fee[:-len(self._native_denom)] or "0"
-            fee_amount = Decimal(raw_amount) * Decimal("1e-6")
-            if fee_amount > Decimal("0"):
-                flat_fees.append(TokenAmount(self._native_denom.upper(), fee_amount))
-        return AddedToCostTradeFee(flat_fees=flat_fees)
+        # Tradebin fees are flat amounts per order, paid on top of the trade (taker when the side is unknown).
+        fee = self._trade_fees.get("maker" if is_maker else "taker")
+        return AddedToCostTradeFee(flat_fees=[fee] if fee is not None else [])
 
     async def _place_order(
         self,
@@ -234,6 +241,11 @@ class BeezeeExchange(ExchangePyBase):
             raise ValueError("Beezee wallet mode is required for order creation.")
         data_source = self._build_data_source()
         market = await data_source.get_market_by_trading_pair(trading_pair)
+        if not self._halted_denoms_loaded:
+            await self._update_halted_denoms_if_due()
+        halt_reason = self._halt_reason(market)
+        if halt_reason is not None:
+            raise ValueError(f"Beezee market {market.market_id} is halted ({halt_reason})")
         chain_price = display_price_to_chain(price, market)
         minimum_amount = minimum_order_size_for_price(chain_price, market)
         if amount < minimum_amount:
@@ -247,31 +259,25 @@ class BeezeeExchange(ExchangePyBase):
             display_amount_to_chain(amount, market.base),
             chain_price,
         )
-        last_error: Optional[str] = None
-        for attempt in range(2):
+        try:
             response = await data_source.broadcast_create_order(
                 market=market,
                 order_type=side,
                 amount=amount,
                 price=price,
-                gas_limit=self._connector_configuration.account_type.create_order_gas_limit,
                 memo=f"hbot:{order_id}",
             )
-            tx_response = response.get("tx_response", {})
-            if int(tx_response.get("code", 0)) == 0:
-                tx_hash = tx_response["txhash"]
-                self._creation_tx_hashes[order_id] = tx_hash
-                self.logger().info(
-                    f"Beezee create order transaction submitted. client_order_id={order_id}, "
-                    f"market={market.market_id}, side={side}, tx_hash={tx_hash}"
-                )
-                return tx_hash, self.current_timestamp
-            last_error = tx_response.get("raw_log", str(tx_response))
-            if "account sequence mismatch" in last_error.lower() and attempt == 0:
-                await data_source.reset_account_sequence()
-                continue
-            raise IOError(f"Beezee order create failed: {last_error}")
-        raise IOError(f"Beezee order create failed: {last_error}")
+        except BeezeeTxRefusedError as error:
+            if error.is_denom_halted:
+                await self._mark_market_halted_by_chain(market)
+            raise IOError(f"Beezee order create failed: {error.chain_message}") from error
+        tx_hash = response["tx_response"]["txhash"]
+        self._creation_tx_hashes[order_id] = tx_hash
+        self.logger().info(
+            f"Beezee create order transaction submitted. client_order_id={order_id}, "
+            f"market={market.market_id}, side={side}, tx_hash={tx_hash}"
+        )
+        return tx_hash, self.current_timestamp
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
         if self._signer is None:
@@ -288,35 +294,27 @@ class BeezeeExchange(ExchangePyBase):
             )
             return False
 
-        last_error: Optional[str] = None
-        for attempt in range(2):
+        try:
             response = await data_source.broadcast_cancel_order(
                 market_id=market.market_id,
                 order_type=CONSTANTS.SIDE_BUY if tracked_order.trade_type is TradeType.BUY else CONSTANTS.SIDE_SELL,
                 order_id=exchange_order_id,
-                gas_limit=self._connector_configuration.account_type.cancel_order_gas_limit,
                 memo=f"hbot-cancel:{order_id}",
             )
-            tx_response = response.get("tx_response", {})
-            if int(tx_response.get("code", 0)) == 0:
-                tx_hash = tx_response["txhash"]
-                self._cancel_tx_hashes[order_id] = tx_hash
-                self.logger().info(
-                    f"Beezee cancel order transaction submitted. client_order_id={order_id}, "
-                    f"exchange_order_id={exchange_order_id}, tx_hash={tx_hash}"
-                )
-                return True
-            last_error = tx_response.get("raw_log", str(tx_response))
-            if "account sequence mismatch" in last_error.lower() and attempt == 0:
-                await data_source.reset_account_sequence()
-                continue
-            raise IOError(f"Beezee cancel failed: {last_error}")
-        raise IOError(f"Beezee cancel failed: {last_error}")
+        except BeezeeTxRefusedError as error:
+            raise IOError(f"Beezee cancel failed: {error.chain_message}") from error
+        tx_hash = response["tx_response"]["txhash"]
+        self._cancel_tx_hashes[order_id] = tx_hash
+        self.logger().info(
+            f"Beezee cancel order transaction submitted. client_order_id={order_id}, "
+            f"exchange_order_id={exchange_order_id}, tx_hash={tx_hash}"
+        )
+        return True
 
     async def _format_trading_rules(self, exchange_info_dict: Dict[str, Any]) -> List[TradingRule]:
         data_source = self._build_data_source()
-        self._tradebin_params = await data_source.get_tradebin_params()
         markets = await data_source.get_all_markets(refresh=True)
+        self._trade_fees = await data_source.get_trade_fees()
         return [
             TradingRule(
                 trading_pair=market.trading_pair,
@@ -334,7 +332,82 @@ class BeezeeExchange(ExchangePyBase):
         ]
 
     async def _update_trading_fees(self):
-        self._tradebin_params = await self._build_data_source().get_tradebin_params()
+        self._trade_fees = await self._build_data_source().get_trade_fees()
+
+    async def _status_polling_loop_fetch_updates(self):
+        await super()._status_polling_loop_fetch_updates()
+        await self._update_halted_denoms_if_due()
+
+    async def _update_halted_denoms_if_due(self):
+        if self._halted_denoms_loaded and time.time() - self._last_halted_denoms_refresh < CONSTANTS.HALTED_DENOMS_REFRESH_INTERVAL:
+            return
+        try:
+            await self._refresh_halted_denoms()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.logger().warning(f"Failed to update Beezee halted denoms. Keeping the last known set. Error: {error}")
+
+    async def _refresh_halted_denoms(self):
+        await self._read_halted_denoms()
+        await self._apply_halt_transitions()
+
+    async def _read_halted_denoms(self):
+        self._halted_denoms = await self._build_data_source().get_halted_denoms()
+        self._refused_halted_market_ids.clear()
+        self._halted_denoms_loaded = True
+        self._last_halted_denoms_refresh = time.time()
+
+    async def _mark_market_halted_by_chain(self, market: BeezeeMarket):
+        # The refusal does not name the denom: re-read the halted set, and if the node still does not list
+        # this market's denoms, treat the market itself as halted until the next refresh.
+        try:
+            await self._read_halted_denoms()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.logger().warning(f"Failed to re-read Beezee halted denoms after a halted refusal. Error: {error}")
+        if self._halt_reason(market) is None:
+            self._refused_halted_market_ids.add(market.market_id)
+        await self._apply_halt_transitions()
+
+    def _halt_reason(self, market: BeezeeMarket) -> Optional[str]:
+        for denom in (market.base.denom, market.quote.denom):
+            if denom in self._halted_denoms:
+                return f"denom {denom}"
+        if market.market_id in self._refused_halted_market_ids:
+            return "denom unknown, refused by the chain"
+        return None
+
+    async def _apply_halt_transitions(self):
+        data_source = self._build_data_source()
+        trading_pairs = set(self._trading_pairs or []) | {order.trading_pair for order in self.in_flight_orders.values()}
+        halted_now: Dict[str, str] = {}
+        for trading_pair in trading_pairs:
+            try:
+                market = await data_source.get_market_by_trading_pair(trading_pair)
+            except KeyError:
+                continue
+            reason = self._halt_reason(market)
+            if reason is not None:
+                halted_now[trading_pair] = reason
+        for trading_pair, reason in halted_now.items():
+            if trading_pair in self._halted_trading_pairs:
+                continue
+            open_orders = [
+                order for order in self.in_flight_orders.values()
+                if order.trading_pair == trading_pair and not order.is_done
+            ]
+            self.logger().warning(
+                f"Beezee market {trading_pair} is halted ({reason}). New orders are refused; "
+                f"cancelling {len(open_orders)} open order(s)."
+            )
+            for order in open_orders:
+                self.cancel(trading_pair, order.client_order_id)
+        for trading_pair in self._halted_trading_pairs:
+            if trading_pair not in halted_now:
+                self.logger().info(f"Beezee market {trading_pair} is no longer halted. Trading is allowed again.")
+        self._halted_trading_pairs = halted_now
 
     async def _user_stream_event_listener(self):
         async for _event in self._iter_user_event_queue():
@@ -531,6 +604,10 @@ class BeezeeExchange(ExchangePyBase):
         tx_hash = cancel_tx_hash or creation_tx_hash
         tx = await data_source.get_tx(tx_hash) if tx_hash else None
         tx_code = int((tx.get("tx_response") or {}).get("code", 0)) if tx is not None else None
+        if tx is not None and tx_hash == creation_tx_hash and tx_code not in (None, 0):
+            tx_response = tx.get("tx_response") or {}
+            if is_denom_halted_error(tx_code, tx_response.get("codespace"), tx_response.get("raw_log")):
+                await self._mark_market_halted_by_chain(market)
         if creation_tx_hash is not None and tx_code not in (None, 0):
             new_state = OrderState.FAILED
         elif cancel_tx_hash is not None and tx_code not in (None, 0):

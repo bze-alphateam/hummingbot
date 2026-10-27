@@ -13,18 +13,25 @@ from hummingbot.connector.exchange.beezee.beezee_signer import BeezeeSigner
 from hummingbot.connector.exchange.beezee.beezee_tx import (
     build_broadcast_request,
     build_signed_transaction,
+    build_simulate_request,
+    build_simulation_transaction,
     fee_amount_from_gas,
+    gas_limit_from_simulation,
     msg_cancel_order,
     msg_create_order,
 )
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeMarket,
+    chain_amount_to_display,
     chain_price_to_display,
     display_amount_to_chain,
     display_price_to_chain,
     market_from_data,
+    parse_coin,
+    token_from_metadata,
     unique_market_symbols,
 )
+from hummingbot.core.data_type.trade_fee import TokenAmount
 from hummingbot.core.web_assistant.connections.data_types import RESTMethod
 from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
 
@@ -33,6 +40,31 @@ from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFa
 class BeezeeAccountInfo:
     account_number: int
     sequence: int
+
+
+class BeezeeTxRefusedError(IOError):
+    """The chain refused a transaction, either in simulation or at broadcast (CheckTx)."""
+
+    def __init__(self, stage: str, message: str, code: Optional[int] = None, codespace: Optional[str] = None):
+        super().__init__(f"Beezee tx {stage} failed: {message}")
+        self.stage = stage
+        self.chain_message = message
+        self.code = code
+        self.codespace = codespace
+
+    @property
+    def is_sequence_mismatch(self) -> bool:
+        return CONSTANTS.ACCOUNT_SEQUENCE_MISMATCH_MESSAGE in self.chain_message.lower()
+
+    @property
+    def is_denom_halted(self) -> bool:
+        return is_denom_halted_error(self.code, self.codespace, self.chain_message)
+
+
+def is_denom_halted_error(code: Optional[int], codespace: Optional[str], message: Optional[str]) -> bool:
+    if code == CONSTANTS.DENOM_HALTED_ERROR_CODE and codespace == CONSTANTS.TRADEBIN_CODESPACE:
+        return True
+    return CONSTANTS.DENOM_HALTED_ERROR_MESSAGE in (message or "").lower()
 
 
 class BeezeeAPIDataSource:
@@ -46,6 +78,7 @@ class BeezeeAPIDataSource:
         gas_price: Decimal,
         account_address: Optional[str] = None,
         signer: Optional[BeezeeSigner] = None,
+        gas_adjustment: Decimal = CONSTANTS.DEFAULT_GAS_ADJUSTMENT,
     ):
         self._api_factory = api_factory
         self._rest_endpoint = rest_endpoint.rstrip("/")
@@ -53,6 +86,7 @@ class BeezeeAPIDataSource:
         self._address_prefix = address_prefix
         self._native_denom = native_denom
         self._gas_price = gas_price
+        self._gas_adjustment = gas_adjustment
         self._account_address = account_address or (signer.address if signer is not None else None)
         self._signer = signer
         self._metadata_by_denom: Dict[str, Dict[str, Any]] = {}
@@ -72,7 +106,7 @@ class BeezeeAPIDataSource:
     def account_address(self) -> Optional[str]:
         return self._account_address
 
-    async def _request(self, path_url: str, params: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None, method: RESTMethod = RESTMethod.GET, limit_id: Optional[str] = None) -> Dict[str, Any]:
+    async def _request(self, path_url: str, params: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None, method: RESTMethod = RESTMethod.GET, limit_id: Optional[str] = None, return_err: bool = False) -> Dict[str, Any]:
         rest_assistant = await self._api_factory.get_rest_assistant()
         throttler_limit_id = limit_id or path_url
         if throttler_limit_id not in self._known_limit_ids:
@@ -83,6 +117,7 @@ class BeezeeAPIDataSource:
             data=data,
             method=method,
             throttler_limit_id=throttler_limit_id,
+            return_err=return_err,
         )
 
     async def _paged_request(self, path_url: str, item_key: str, params: Optional[Dict[str, Any]] = None, page_limit: int = CONSTANTS.DEFAULT_MARKET_PAGE_SIZE) -> List[Dict[str, Any]]:
@@ -102,6 +137,28 @@ class BeezeeAPIDataSource:
 
     async def get_tradebin_params(self) -> Dict[str, Any]:
         return (await self._request(CONSTANTS.TRADEBIN_PARAMS_PATH_URL)).get("params", {})
+
+    async def get_trade_fees(self) -> Dict[str, Optional[TokenAmount]]:
+        """Returns the tradebin maker and taker fees as flat token amounts in display units.
+
+        Chain v8.2.0 returns camelCase Coin objects (`marketMakerFee`); older chains a snake_case "1000ubze" string.
+        """
+        params = await self.get_tradebin_params()
+        fees: Dict[str, Optional[TokenAmount]] = {}
+        for side, keys in (("maker", ("marketMakerFee", "market_maker_fee")), ("taker", ("marketTakerFee", "market_taker_fee"))):
+            raw_fee = next((params[key] for key in keys if key in params), None)
+            coin = parse_coin(raw_fee)
+            if coin is None or coin[1] <= 0:
+                fees[side] = None
+                continue
+            denom, amount = coin
+            metadata = self._metadata_by_denom.get(denom) or await self.get_denom_metadata(denom)
+            token = token_from_metadata(denom, metadata)
+            fees[side] = TokenAmount(token.symbol, chain_amount_to_display(amount, token))
+        return fees
+
+    async def get_halted_denoms(self) -> Set[str]:
+        return set(await self._paged_request(CONSTANTS.HALTED_DENOMS_PATH_URL, "denoms"))
 
     async def get_denom_metadata(self, denom: str) -> Dict[str, Any]:
         encoded_denom = quote(denom, safe="")
@@ -252,39 +309,76 @@ class BeezeeAPIDataSource:
         except Exception:
             return None
 
-    async def broadcast_create_order(self, market: BeezeeMarket, order_type: str, amount: Decimal, price: Decimal, gas_limit: int, memo: str = "") -> Dict[str, Any]:
+    async def simulate_gas(self, messages: List[bytes], sequence: int, memo: str = "") -> int:
+        if self._signer is None:
+            raise ValueError("Beezee wallet mode is required to simulate transactions.")
+        tx_bytes = build_simulation_transaction(self._signer.public_key_bytes, sequence, messages, memo=memo)
+        response = await self._request(
+            CONSTANTS.SIMULATE_TX_PATH_URL,
+            method=RESTMethod.POST,
+            data=build_simulate_request(tx_bytes),
+            return_err=True,
+        )
+        gas_used = (response.get("gas_info") or {}).get("gas_used")
+        if gas_used is None:
+            raise BeezeeTxRefusedError("simulation", str(response.get("message") or response))
+        return int(gas_used)
+
+    async def simulate_sign_and_broadcast(self, messages: List[bytes], memo: str = "") -> Dict[str, Any]:
+        """Simulates the messages for gas, then signs and broadcasts them in a single tx.
+
+        gas limit = ceil(gas_used * gas_adjustment), fee = ceil(gas limit * gas_price) in the native denom.
+        A refused simulation is never broadcast. An account sequence mismatch, in simulation or at broadcast,
+        resets the cached sequence and retries once; any other refusal raises BeezeeTxRefusedError.
+        """
+        if self._signer is None:
+            raise ValueError("Beezee wallet mode is required to sign transactions.")
+        for attempt in range(2):
+            account = await self.reserve_account_info_sequence()
+            try:
+                gas_used = await self.simulate_gas(messages, account.sequence, memo=memo)
+                gas_limit = gas_limit_from_simulation(gas_used, self._gas_adjustment)
+                tx_bytes = build_signed_transaction(
+                    signer=self._signer,
+                    chain_id=self._chain_id,
+                    account_number=account.account_number,
+                    sequence=account.sequence,
+                    messages=messages,
+                    fee_denom=self._native_denom,
+                    fee_amount=fee_amount_from_gas(gas_limit, self._gas_price),
+                    gas_limit=gas_limit,
+                    memo=memo,
+                )
+                response = await self._request(CONSTANTS.BROADCAST_TX_PATH_URL, method=RESTMethod.POST, data=build_broadcast_request(tx_bytes))
+                tx_response = response.get("tx_response", {})
+                code = int(tx_response.get("code", 0))
+                if code != 0:
+                    raise BeezeeTxRefusedError(
+                        "broadcast",
+                        tx_response.get("raw_log") or str(tx_response),
+                        code=code,
+                        codespace=tx_response.get("codespace"),
+                    )
+                return response
+            except BeezeeTxRefusedError as error:
+                # The reserved sequence was not used on chain, so the cached one is stale either way.
+                await self.reset_account_sequence()
+                if error.is_sequence_mismatch and attempt == 0:
+                    continue
+                raise
+        raise RuntimeError("Beezee tx retry loop exited without a result.")
+
+    async def broadcast_create_order(self, market: BeezeeMarket, order_type: str, amount: Decimal, price: Decimal, memo: str = "") -> Dict[str, Any]:
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required for order creation.")
-        account = await self.reserve_account_info_sequence()
-        tx_bytes = build_signed_transaction(
-            signer=self._signer,
-            chain_id=self._chain_id,
-            account_number=account.account_number,
-            sequence=account.sequence,
-            messages=[msg_create_order(self._signer.address, order_type, display_amount_to_chain(amount, market.base), display_price_to_chain(price, market), market.market_id)],
-            fee_denom=self._native_denom,
-            fee_amount=fee_amount_from_gas(gas_limit, self._gas_price),
-            gas_limit=gas_limit,
-            memo=memo,
-        )
-        return await self._request(CONSTANTS.BROADCAST_TX_PATH_URL, method=RESTMethod.POST, data=build_broadcast_request(tx_bytes))
+        message = msg_create_order(self._signer.address, order_type, display_amount_to_chain(amount, market.base), display_price_to_chain(price, market), market.market_id)
+        return await self.simulate_sign_and_broadcast([message], memo=memo)
 
-    async def broadcast_cancel_order(self, market_id: str, order_type: str, order_id: str, gas_limit: int, memo: str = "") -> Dict[str, Any]:
+    async def broadcast_cancel_order(self, market_id: str, order_type: str, order_id: str, memo: str = "") -> Dict[str, Any]:
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required for cancels.")
-        account = await self.reserve_account_info_sequence()
-        tx_bytes = build_signed_transaction(
-            signer=self._signer,
-            chain_id=self._chain_id,
-            account_number=account.account_number,
-            sequence=account.sequence,
-            messages=[msg_cancel_order(self._signer.address, market_id, order_id, order_type)],
-            fee_denom=self._native_denom,
-            fee_amount=fee_amount_from_gas(gas_limit, self._gas_price),
-            gas_limit=gas_limit,
-            memo=memo,
-        )
-        return await self._request(CONSTANTS.BROADCAST_TX_PATH_URL, method=RESTMethod.POST, data=build_broadcast_request(tx_bytes))
+        message = msg_cancel_order(self._signer.address, market_id, order_id, order_type)
+        return await self.simulate_sign_and_broadcast([message], memo=memo)
 
     def candidate_order_ids(self, refs: List[Dict[str, Any]], market_id: str, order_type: str) -> List[str]:
         return sorted([ref["id"] for ref in refs if ref.get("market_id") == market_id and ref.get("order_type") == order_type], reverse=True)

@@ -1,8 +1,26 @@
+import json
+import re
 import unittest
 from decimal import Decimal
+from typing import Any, Dict, List
 from unittest.mock import AsyncMock
 
-from hummingbot.connector.exchange.beezee.beezee_api_data_source import BeezeeAPIDataSource
+from aioresponses import aioresponses
+from yarl import URL
+
+from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS, beezee_web_utils as web_utils
+from hummingbot.connector.exchange.beezee.beezee_api_data_source import BeezeeAPIDataSource, BeezeeTxRefusedError
+from hummingbot.connector.exchange.beezee.beezee_signer import BeezeeSigner
+from hummingbot.connector.exchange.beezee.beezee_tx import (
+    build_broadcast_request,
+    build_signed_transaction,
+    build_simulate_request,
+    build_simulation_transaction,
+    msg_create_order,
+)
+from hummingbot.connector.exchange.beezee.beezee_utils import derive_private_key_from_mnemonic
+from hummingbot.core.api_throttler.async_throttler import AsyncThrottler
+from hummingbot.core.data_type.trade_fee import TokenAmount
 
 
 class BeezeeAPIDataSourceTests(unittest.IsolatedAsyncioTestCase):
@@ -105,3 +123,205 @@ class BeezeeAPIDataSourceTests(unittest.IsolatedAsyncioTestCase):
             self.data_source.fingerprint_history_trade(trade),
             self.data_source.fingerprint_history_trade(dict(trade)),
         )
+
+
+TEST_MNEMONIC = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+REST_URL = "https://rest.getbze.com"
+BZE_METADATA = {
+    "symbol": "BZE",
+    "display": "bze",
+    "denom_units": [{"denom": "ubze", "exponent": 0}, {"denom": "bze", "exponent": 6}],
+}
+
+
+class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
+    """Request/response tests against mocked REST endpoints."""
+
+    def setUp(self) -> None:
+        self.signer = BeezeeSigner(derive_private_key_from_mnemonic(TEST_MNEMONIC), "bze")
+        self.data_source = BeezeeAPIDataSource(
+            api_factory=web_utils.build_api_factory(throttler=AsyncThrottler(CONSTANTS.RATE_LIMITS)),
+            rest_endpoint=REST_URL,
+            chain_id="beezee-1",
+            address_prefix="bze",
+            native_denom="ubze",
+            gas_price=Decimal("0.01"),
+            signer=self.signer,
+            gas_adjustment=Decimal("1.3"),
+        )
+        self.messages = [msg_create_order(self.signer.address, "buy", "2000000", "0.5", "ubze/uusdc")]
+        self.account_url = f"{REST_URL}{CONSTANTS.ACCOUNT_INFO_PATH_URL}/{self.signer.address}"
+        self.simulate_url = f"{REST_URL}{CONSTANTS.SIMULATE_TX_PATH_URL}"
+        self.broadcast_url = f"{REST_URL}{CONSTANTS.BROADCAST_TX_PATH_URL}"
+
+    def _mock_account(self, mock_api: aioresponses, sequence: int):
+        mock_api.get(self.account_url, payload={"account": {"account_number": "7", "sequence": str(sequence)}})
+
+    @staticmethod
+    def _request_bodies(mock_api: aioresponses, url: str) -> List[Dict[str, Any]]:
+        calls = mock_api.requests.get(("POST", URL(url)), [])
+        return [json.loads(call.kwargs["data"]) for call in calls]
+
+    @aioresponses()
+    async def test_get_trade_fees_parses_v820_coin_params(self, mock_api):
+        mock_api.get(
+            f"{REST_URL}{CONSTANTS.TRADEBIN_PARAMS_PATH_URL}",
+            payload={"params": {
+                "createMarketFee": {"denom": "ubze", "amount": "25000000000"},
+                "marketMakerFee": {"denom": "ubze", "amount": "1000"},
+                "marketTakerFee": {"denom": "ubze", "amount": "100000"},
+                "native_denom": "ubze",
+            }},
+        )
+        mock_api.get(f"{REST_URL}{CONSTANTS.DENOM_METADATA_PATH_URL}/ubze", payload={"metadata": BZE_METADATA})
+
+        fees = await self.data_source.get_trade_fees()
+
+        self.assertEqual(TokenAmount("BZE", Decimal("0.001")), fees["maker"])
+        self.assertEqual(TokenAmount("BZE", Decimal("0.1")), fees["taker"])
+
+    @aioresponses()
+    async def test_get_trade_fees_accepts_legacy_string_params(self, mock_api):
+        mock_api.get(
+            f"{REST_URL}{CONSTANTS.TRADEBIN_PARAMS_PATH_URL}",
+            payload={"params": {"market_maker_fee": "1000ubze", "market_taker_fee": "100000ubze"}},
+        )
+        mock_api.get(f"{REST_URL}{CONSTANTS.DENOM_METADATA_PATH_URL}/ubze", payload={"metadata": BZE_METADATA})
+
+        fees = await self.data_source.get_trade_fees()
+
+        self.assertEqual(TokenAmount("BZE", Decimal("0.001")), fees["maker"])
+        self.assertEqual(TokenAmount("BZE", Decimal("0.1")), fees["taker"])
+
+    @aioresponses()
+    async def test_get_trade_fees_converts_with_the_fee_denom_exponent(self, mock_api):
+        mock_api.get(
+            f"{REST_URL}{CONSTANTS.TRADEBIN_PARAMS_PATH_URL}",
+            payload={"params": {
+                "marketMakerFee": {"denom": "factory/bze1x/mill", "amount": "5000"},
+                "marketTakerFee": {"denom": "ubze", "amount": "0"},
+            }},
+        )
+        mock_api.get(
+            f"{REST_URL}{CONSTANTS.DENOM_METADATA_PATH_URL}/factory%2Fbze1x%2Fmill",
+            payload={"metadata": {
+                "symbol": "MILL",
+                "display": "mill",
+                "denom_units": [{"denom": "factory/bze1x/mill", "exponent": 0}, {"denom": "mill", "exponent": 3}],
+            }},
+        )
+
+        fees = await self.data_source.get_trade_fees()
+
+        self.assertEqual(TokenAmount("MILL", Decimal("5")), fees["maker"])
+        self.assertIsNone(fees["taker"])
+
+    @aioresponses()
+    async def test_simulate_sign_and_broadcast_uses_simulated_gas_and_fee(self, mock_api):
+        self._mock_account(mock_api, sequence=3)
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_wanted": "0", "gas_used": "100001"}})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "AB" * 32}})
+
+        response = await self.data_source.simulate_sign_and_broadcast(self.messages, memo="hbot:OID1")
+
+        self.assertEqual("AB" * 32, response["tx_response"]["txhash"])
+        simulated = self._request_bodies(mock_api, self.simulate_url)
+        self.assertEqual(
+            [build_simulate_request(build_simulation_transaction(self.signer.public_key_bytes, 3, self.messages, memo="hbot:OID1"))],
+            simulated,
+        )
+        # gas limit = ceil(100001 * 1.3) = 130002; fee = ceil(130002 * 0.01) = 1301 ubze
+        expected_tx = build_signed_transaction(
+            signer=self.signer,
+            chain_id="beezee-1",
+            account_number=7,
+            sequence=3,
+            messages=self.messages,
+            fee_denom="ubze",
+            fee_amount="1301",
+            gas_limit=130002,
+            memo="hbot:OID1",
+        )
+        self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
+
+    @aioresponses()
+    async def test_simulation_error_is_never_broadcast(self, mock_api):
+        self._mock_account(mock_api, sequence=3)
+        mock_api.post(
+            self.simulate_url,
+            status=400,
+            payload={"code": 2, "message": "failed to execute message; message index: 0: amount should be bigger than: 4: invalid order amount", "details": []},
+        )
+
+        with self.assertRaises(IOError) as context:
+            await self.data_source.simulate_sign_and_broadcast(self.messages)
+
+        self.assertIn("amount should be bigger than: 4", str(context.exception))
+        self.assertEqual([], self._request_bodies(mock_api, self.broadcast_url))
+
+    @aioresponses()
+    async def test_simulation_sequence_mismatch_resets_and_retries_once(self, mock_api):
+        self._mock_account(mock_api, sequence=3)
+        self._mock_account(mock_api, sequence=4)
+        mock_api.post(
+            self.simulate_url,
+            status=400,
+            payload={"code": 2, "message": "account sequence mismatch, expected 4, got 3: incorrect account sequence", "details": []},
+        )
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "100000"}})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "CD" * 32}})
+
+        response = await self.data_source.simulate_sign_and_broadcast(self.messages)
+
+        self.assertEqual("CD" * 32, response["tx_response"]["txhash"])
+        self.assertEqual(2, len(self._request_bodies(mock_api, self.simulate_url)))
+        expected_tx = build_signed_transaction(
+            signer=self.signer,
+            chain_id="beezee-1",
+            account_number=7,
+            sequence=4,
+            messages=self.messages,
+            fee_denom="ubze",
+            fee_amount="1300",
+            gas_limit=130000,
+        )
+        self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
+
+    @aioresponses()
+    async def test_second_sequence_mismatch_is_not_retried_again(self, mock_api):
+        mismatch = {"code": 2, "message": "account sequence mismatch, expected 9, got 3: incorrect account sequence", "details": []}
+        self._mock_account(mock_api, sequence=3)
+        self._mock_account(mock_api, sequence=3)
+        mock_api.post(self.simulate_url, status=400, payload=mismatch)
+        mock_api.post(self.simulate_url, status=400, payload=mismatch)
+
+        with self.assertRaises(IOError):
+            await self.data_source.simulate_sign_and_broadcast(self.messages)
+
+        self.assertEqual(2, len(self._request_bodies(mock_api, self.simulate_url)))
+        self.assertEqual([], self._request_bodies(mock_api, self.broadcast_url))
+
+    @aioresponses()
+    async def test_refused_broadcast_is_flagged_as_denom_halted(self, mock_api):
+        self._mock_account(mock_api, sequence=3)
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "100000"}})
+        mock_api.post(
+            self.broadcast_url,
+            payload={"tx_response": {"code": 4017, "codespace": "tradebin", "raw_log": "market ubze/uusdc is halted: denom is halted", "txhash": ""}},
+        )
+
+        with self.assertRaises(BeezeeTxRefusedError) as context:
+            await self.data_source.simulate_sign_and_broadcast(self.messages)
+
+        self.assertTrue(context.exception.is_denom_halted)
+        self.assertEqual(4017, context.exception.code)
+
+    @aioresponses()
+    async def test_get_halted_denoms_reads_all_pages(self, mock_api):
+        url = re.compile(rf"^{re.escape(REST_URL + CONSTANTS.HALTED_DENOMS_PATH_URL)}(\?.*)?$")
+        mock_api.get(url, payload={"denoms": ["uusdc.n"], "pagination": {"next_key": "AQ==", "total": "0"}})
+        mock_api.get(url, payload={"denoms": ["factory/bze1x/halted"], "pagination": {"next_key": None, "total": "0"}})
+
+        halted = await self.data_source.get_halted_denoms()
+
+        self.assertEqual({"uusdc.n", "factory/bze1x/halted"}, halted)
