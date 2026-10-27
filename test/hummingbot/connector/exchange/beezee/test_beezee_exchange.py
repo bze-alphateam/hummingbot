@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 import unittest
@@ -401,24 +402,69 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         data_source.broadcast_create_order.assert_not_awaited()
         data_source.get_user_market_orders.assert_not_awaited()
 
-    async def test_halt_transition_cancels_open_orders_once(self):
-        self._halt_data_source([{"ubze"}, {"ubze"}])
+    async def _drain_tasks(self):
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    def _track_order(self, order_id: str, exchange_order_id=None):
         self.exchange.start_tracking_order(
-            order_id="OID-OPEN",
-            exchange_order_id="000000000000000000000042",
+            order_id=order_id,
+            exchange_order_id=exchange_order_id,
             trading_pair="BZE-USDC",
             trade_type=TradeType.SELL,
             price=Decimal("2.5"),
             amount=Decimal("1"),
             order_type=OrderType.LIMIT,
         )
-        self.exchange.cancel = Mock()
+
+    async def test_halt_transition_cancels_open_orders_once(self):
+        data_source = self._halt_data_source([{"ubze"}, {"ubze"}])
+        data_source.broadcast_cancel_order = AsyncMock(return_value={"tx_response": {"code": 0, "txhash": "CA" * 32}})
+        self._track_order("OID-OPEN", "000000000000000000000042")
 
         await self._force_halted_denoms_refresh()
+        await self._drain_tasks()
         await self._force_halted_denoms_refresh()
+        await self._drain_tasks()
 
-        self.exchange.cancel.assert_called_once_with("BZE-USDC", "OID-OPEN")
+        data_source.broadcast_cancel_order.assert_awaited_once()
+        self.assertEqual("000000000000000000000042", data_source.broadcast_cancel_order.call_args.kwargs["order_id"])
+        self.assertTrue(self.exchange.in_flight_orders["OID-OPEN"].is_pending_cancel_confirmation)
         self.assertEqual(1, self._logged(logging.WARNING, "Beezee market BZE-USDC is halted (denom ubze)"))
+
+    async def test_halt_cancel_is_retried_once_the_exchange_order_id_resolves(self):
+        data_source = self._halt_data_source([{"ubze"}, {"ubze"}])
+        data_source.broadcast_cancel_order = AsyncMock(return_value={"tx_response": {"code": 0, "txhash": "CA" * 32}})
+        self.exchange._request_order_status = AsyncMock(return_value=Mock(exchange_order_id=None))
+        self._track_order("OID-QUEUED")
+
+        await self._force_halted_denoms_refresh()
+        await self._drain_tasks()
+        data_source.broadcast_cancel_order.assert_not_awaited()
+
+        # The create queued before the halt executed after all: its order id is now known.
+        self.exchange.in_flight_orders["OID-QUEUED"].update_exchange_order_id("000000000000000000000043")
+        await self._force_halted_denoms_refresh()
+        await self._drain_tasks()
+
+        data_source.broadcast_cancel_order.assert_awaited_once()
+        self.assertEqual("000000000000000000000043", data_source.broadcast_cancel_order.call_args.kwargs["order_id"])
+
+    async def test_failed_halt_cancel_is_retried_on_the_next_poll(self):
+        data_source = self._halt_data_source([{"ubze"}, {"ubze"}])
+        data_source.broadcast_cancel_order = AsyncMock(side_effect=[
+            IOError("Beezee tx broadcast failed: timed out"),
+            {"tx_response": {"code": 0, "txhash": "CA" * 32}},
+        ])
+        self._track_order("OID-OPEN", "000000000000000000000044")
+
+        await self._force_halted_denoms_refresh()
+        await self._drain_tasks()
+        await self._force_halted_denoms_refresh()
+        await self._drain_tasks()
+
+        self.assertEqual(2, data_source.broadcast_cancel_order.await_count)
+        self.assertTrue(self.exchange.in_flight_orders["OID-OPEN"].is_pending_cancel_confirmation)
 
     async def test_halted_denoms_refresh_waits_for_the_interval(self):
         data_source = self._halt_data_source([set(), set()])

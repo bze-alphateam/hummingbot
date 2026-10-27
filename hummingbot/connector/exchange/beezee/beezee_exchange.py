@@ -33,6 +33,7 @@ from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState,
 from hummingbot.core.data_type.order_book_tracker_data_source import OrderBookTrackerDataSource
 from hummingbot.core.data_type.trade_fee import AddedToCostTradeFee, TokenAmount, TradeFeeBase
 from hummingbot.core.data_type.user_stream_tracker_data_source import UserStreamTrackerDataSource
+from hummingbot.core.utils.async_utils import safe_ensure_future
 from hummingbot.core.web_assistant.auth import AuthBase
 from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
 
@@ -91,6 +92,7 @@ class BeezeeExchange(ExchangePyBase):
         # Markets the chain refused as halted although the last halted-denoms read did not list their denoms.
         self._refused_halted_market_ids: Set[str] = set()
         self._halted_trading_pairs: Dict[str, str] = {}
+        self._halt_cancel_tasks: Dict[str, asyncio.Task] = {}
         self._creation_tx_hashes: Dict[str, str] = {}
         self._cancel_tx_hashes: Dict[str, str] = {}
         self._pre_create_order_ids: Dict[str, Set[str]] = {}
@@ -337,6 +339,7 @@ class BeezeeExchange(ExchangePyBase):
     async def _status_polling_loop_fetch_updates(self):
         await super()._status_polling_loop_fetch_updates()
         await self._update_halted_denoms_if_due()
+        self._cancel_open_orders_on_halted_pairs()
 
     async def _update_halted_denoms_if_due(self):
         if self._halted_denoms_loaded and time.time() - self._last_halted_denoms_refresh < CONSTANTS.HALTED_DENOMS_REFRESH_INTERVAL:
@@ -392,22 +395,36 @@ class BeezeeExchange(ExchangePyBase):
             if reason is not None:
                 halted_now[trading_pair] = reason
         for trading_pair, reason in halted_now.items():
-            if trading_pair in self._halted_trading_pairs:
-                continue
-            open_orders = [
-                order for order in self.in_flight_orders.values()
-                if order.trading_pair == trading_pair and not order.is_done
-            ]
-            self.logger().warning(
-                f"Beezee market {trading_pair} is halted ({reason}). New orders are refused; "
-                f"cancelling {len(open_orders)} open order(s)."
-            )
-            for order in open_orders:
-                self.cancel(trading_pair, order.client_order_id)
+            if trading_pair not in self._halted_trading_pairs:
+                self.logger().warning(
+                    f"Beezee market {trading_pair} is halted ({reason}). New orders are refused; "
+                    f"cancelling its open orders."
+                )
         for trading_pair in self._halted_trading_pairs:
             if trading_pair not in halted_now:
                 self.logger().info(f"Beezee market {trading_pair} is no longer halted. Trading is allowed again.")
         self._halted_trading_pairs = halted_now
+        self._cancel_open_orders_on_halted_pairs()
+
+    def _cancel_open_orders_on_halted_pairs(self):
+        """Keeps cancelling the open orders on halted pairs until they are gone.
+
+        Called on every halted-denoms refresh and status poll. A cancel can be deferred (exchange order id not
+        resolved yet) or fail, and a create queued before the halt still executes, so one attempt is not enough.
+        An order with a cancel task running or a cancel tx awaiting confirmation is skipped.
+        """
+        for order in list(self.in_flight_orders.values()):
+            if order.trading_pair not in self._halted_trading_pairs or order.is_done or order.is_pending_cancel_confirmation:
+                continue
+            running = self._halt_cancel_tasks.get(order.client_order_id)
+            if running is not None and not running.done():
+                continue
+            self._halt_cancel_tasks[order.client_order_id] = safe_ensure_future(
+                self._execute_cancel(order.trading_pair, order.client_order_id)
+            )
+        for client_order_id in [key for key, task in self._halt_cancel_tasks.items() if task.done()]:
+            if client_order_id not in self.in_flight_orders:
+                del self._halt_cancel_tasks[client_order_id]
 
     async def _user_stream_event_listener(self):
         async for _event in self._iter_user_event_queue():
