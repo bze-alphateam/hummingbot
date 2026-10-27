@@ -1,3 +1,5 @@
+import asyncio
+import base64
 import json
 import re
 import unittest
@@ -5,7 +7,7 @@ from decimal import Decimal
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock
 
-from aioresponses import aioresponses
+from aioresponses import CallbackResult, aioresponses
 from yarl import URL
 
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS, beezee_web_utils as web_utils
@@ -311,3 +313,68 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
         halted = await self.data_source.get_halted_denoms()
 
         self.assertEqual({"uusdc.n", "factory/bze1x/halted"}, halted)
+
+    @aioresponses()
+    async def test_concurrent_txs_get_consecutive_sequences(self, mock_api):
+        # Node model: the account query returns committed state (sequence 3 until a block), while simulation and
+        # CheckTx accept only the next sequence of the node's check state, which a broadcast advances. A bid and an
+        # ask placed together must not race: the second may only simulate after the first is broadcast.
+        check_state = {"sequence": 3}
+        memos = ["hbot:BID", "hbot:ASK"]
+
+        async def simulate(url, **kwargs):
+            tx_bytes = base64.b64decode(json.loads(kwargs["data"])["tx_bytes"])
+            expected = {
+                build_simulation_transaction(self.signer.public_key_bytes, check_state["sequence"], self.messages, memo=memo)
+                for memo in memos
+            }
+            # The node reads its state when the request arrives and answers after a round trip.
+            await asyncio.sleep(0.01)
+            if tx_bytes in expected:
+                return CallbackResult(payload={"gas_info": {"gas_used": "100000"}})
+            return CallbackResult(status=400, payload={
+                "code": 2,
+                "message": f"account sequence mismatch, expected {check_state['sequence']}: incorrect account sequence",
+                "details": [],
+            })
+
+        def broadcast(url, **kwargs):
+            check_state["sequence"] += 1
+            return CallbackResult(payload={"tx_response": {"code": 0, "txhash": f"{check_state['sequence']:064d}"}})
+
+        mock_api.get(self.account_url, payload={"account": {"account_number": "7", "sequence": "3"}}, repeat=True)
+        mock_api.post(self.simulate_url, callback=simulate, repeat=True)
+        mock_api.post(self.broadcast_url, callback=broadcast, repeat=True)
+
+        responses = await asyncio.gather(*[
+            self.data_source.simulate_sign_and_broadcast(self.messages, memo=memo) for memo in memos
+        ])
+
+        self.assertEqual({f"{4:064d}", f"{5:064d}"}, {response["tx_response"]["txhash"] for response in responses})
+        self.assertEqual(2, len(self._request_bodies(mock_api, self.simulate_url)))
+        self.assertEqual(1, len(mock_api.requests[("GET", URL(self.account_url))]))
+
+    @aioresponses()
+    async def test_non_json_simulation_error_resets_the_sequence(self, mock_api):
+        self._mock_account(mock_api, sequence=3)
+        self._mock_account(mock_api, sequence=3)
+        mock_api.post(self.simulate_url, status=502, body="<html><body>502 Bad Gateway</body></html>", content_type="text/html")
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "100000"}})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "EF" * 32}})
+
+        with self.assertRaises(IOError) as context:
+            await self.data_source.simulate_sign_and_broadcast(self.messages)
+        await self.data_source.simulate_sign_and_broadcast(self.messages)
+
+        self.assertIn("502 Bad Gateway", str(context.exception))
+        expected_tx = build_signed_transaction(
+            signer=self.signer,
+            chain_id="beezee-1",
+            account_number=7,
+            sequence=3,
+            messages=self.messages,
+            fee_denom="ubze",
+            fee_amount="1300",
+            gas_limit=130000,
+        )
+        self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
