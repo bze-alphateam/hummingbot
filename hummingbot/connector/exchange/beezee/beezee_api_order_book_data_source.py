@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 from decimal import Decimal
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
 from hummingbot.connector.exchange.beezee.beezee_order_book import BeezeeOrderBook
@@ -17,8 +17,16 @@ if TYPE_CHECKING:
 
 
 class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
-    def __init__(self, trading_pairs: List[str], data_source: "BeezeeAPIDataSource", api_factory: WebAssistantsFactory, websocket_endpoint: str):
+    def __init__(
+        self,
+        trading_pairs: List[str],
+        data_source: "BeezeeAPIDataSource",
+        api_factory: WebAssistantsFactory,
+        websocket_endpoint: str,
+        block_listener: Optional[Callable[[], None]] = None,
+    ):
         super().__init__(trading_pairs)
+        self._block_listener = block_listener
         self._data_source = data_source
         self._api_factory = api_factory
         self._websocket_endpoint = websocket_endpoint
@@ -71,6 +79,8 @@ class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
             if isinstance(data, str):
                 data = json.loads(data)
             if isinstance(data, dict) and ("NewBlock" in json.dumps(data) or data.get("method") == "subscription"):
+                if self._block_listener is not None:
+                    self._block_listener()
                 await self._poll_and_publish()
 
     async def _poll_and_publish(self):

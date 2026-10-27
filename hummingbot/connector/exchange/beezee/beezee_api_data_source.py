@@ -79,9 +79,11 @@ class BeezeeAPIDataSource:
         account_address: Optional[str] = None,
         signer: Optional[BeezeeSigner] = None,
         gas_adjustment: Decimal = CONSTANTS.DEFAULT_GAS_ADJUSTMENT,
+        rpc_endpoint: Optional[str] = None,
     ):
         self._api_factory = api_factory
         self._rest_endpoint = rest_endpoint.rstrip("/")
+        self._rpc_endpoint = (rpc_endpoint or "").rstrip("/")
         self._chain_id = chain_id
         self._address_prefix = address_prefix
         self._native_denom = native_denom
@@ -119,6 +121,27 @@ class BeezeeAPIDataSource:
             throttler_limit_id=throttler_limit_id,
             return_err=return_err,
         )
+
+    async def _rpc_request(self, path_url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if not self._rpc_endpoint:
+            raise ValueError("Beezee RPC endpoint is required to read block results.")
+        rest_assistant = await self._api_factory.get_rest_assistant()
+        response = await rest_assistant.execute_request(
+            url=f"{self._rpc_endpoint}{path_url}",
+            params=params,
+            method=RESTMethod.GET,
+            throttler_limit_id=CONSTANTS.RPC_LIMIT_ID,
+        )
+        if response.get("error"):
+            raise IOError(f"Beezee RPC {path_url} failed: {response['error']}")
+        return response.get("result") or {}
+
+    async def get_latest_block_height(self) -> int:
+        status = await self._rpc_request(CONSTANTS.RPC_STATUS_PATH_URL)
+        return int(status["sync_info"]["latest_block_height"])
+
+    async def get_block_results(self, height: int) -> Dict[str, Any]:
+        return await self._rpc_request(CONSTANTS.BLOCK_RESULTS_PATH_URL, params={"height": height})
 
     async def _paged_request(self, path_url: str, item_key: str, params: Optional[Dict[str, Any]] = None, page_limit: int = CONSTANTS.DEFAULT_MARKET_PAGE_SIZE) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
@@ -379,9 +402,6 @@ class BeezeeAPIDataSource:
             raise ValueError("Beezee wallet mode is required for cancels.")
         message = msg_cancel_order(self._signer.address, market_id, order_id, order_type)
         return await self.simulate_sign_and_broadcast([message], memo=memo)
-
-    def candidate_order_ids(self, refs: List[Dict[str, Any]], market_id: str, order_type: str) -> List[str]:
-        return sorted([ref["id"] for ref in refs if ref.get("market_id") == market_id and ref.get("order_type") == order_type], reverse=True)
 
     def fingerprint_history_trade(self, trade: Dict[str, Any]) -> str:
         fingerprint = "|".join([str(trade.get("executed_at")), trade.get("market_id", ""), trade.get("order_type", ""), trade.get("amount", ""), trade.get("price", ""), trade.get("maker", ""), trade.get("taker", "")])

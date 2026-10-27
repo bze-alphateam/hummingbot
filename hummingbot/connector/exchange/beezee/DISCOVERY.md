@@ -65,7 +65,9 @@ Derived from chain code:
 - `MsgCreateOrder` does not return an order id.
 - Orders are first queued and then processed in `tradebin` `EndBlock`.
 - Order ids are generated only when an order is actually saved to the book.
-- Because of that, client order id to Beezee order id mapping requires post-broadcast polling of user open orders.
+- Since chain v8.2.0 the queue `message_id` is on the tx event (`OrderCreateMessageEvent`, `OrderCancelMessageEvent`) and on
+  every outcome event (`OrderExecutedEvent`, `OrderSavedEvent`, `OrderCanceledEvent`), which links a client order to its
+  Beezee order id exactly (see README "Order tracking").
 - `HistoryOrder` records fills without order ids, only market, side, price, amount, maker, taker, and timestamp.
 
 ## Current chain metadata
