@@ -19,20 +19,20 @@ class BeezeeAPIDataSourceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_get_all_markets_builds_symbol_map_and_market_cache(self):
         self.data_source._paged_request = AsyncMock(return_value=[{"base": "ubze", "quote": "uusdc"}])
-        self.data_source.get_denom_metadata = AsyncMock(
-            side_effect=[
-                {
-                    "symbol": "BZE",
-                    "display": "bze",
-                    "denom_units": [{"denom": "ubze", "exponent": 0}, {"denom": "bze", "exponent": 6}],
-                },
-                {
-                    "symbol": "USDC",
-                    "display": "usdc",
-                    "denom_units": [{"denom": "uusdc", "exponent": 0}, {"denom": "usdc", "exponent": 6}],
-                },
-            ]
-        )
+        metadata_by_denom = {
+            "ubze": {
+                "symbol": "BZE",
+                "display": "bze",
+                "denom_units": [{"denom": "ubze", "exponent": 0}, {"denom": "bze", "exponent": 6}],
+            },
+            "uusdc": {
+                "symbol": "USDC",
+                "display": "usdc",
+                "denom_units": [{"denom": "uusdc", "exponent": 0}, {"denom": "usdc", "exponent": 6}],
+            },
+        }
+        # Denoms are fetched in set order, which varies with the hash seed.
+        self.data_source.get_denom_metadata = AsyncMock(side_effect=lambda denom: metadata_by_denom[denom])
 
         markets = await self.data_source.get_all_markets(refresh=True)
 
