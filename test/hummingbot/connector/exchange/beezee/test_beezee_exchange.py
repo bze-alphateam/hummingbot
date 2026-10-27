@@ -8,8 +8,8 @@ from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeMainnetNetworkMode,
     BeezeeMnemonicWalletAccountMode,
     BeezeeReadOnlyAccountMode,
-    private_key_from_account_mode,
     market_from_data,
+    private_key_from_account_mode,
 )
 from hummingbot.core.data_type.common import OrderType, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState

@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
-from bidict import bidict
 import ecdsa
+from bidict import bidict
 from pydantic import ConfigDict, Field, SecretStr, field_validator
 
 from hummingbot.client.config.config_data_types import BaseClientModel, BaseConnectorConfigMap

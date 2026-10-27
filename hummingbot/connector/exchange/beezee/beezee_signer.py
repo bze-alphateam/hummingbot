@@ -3,7 +3,6 @@ import hashlib
 import ecdsa
 from Crypto.Hash import RIPEMD160
 
-
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
 

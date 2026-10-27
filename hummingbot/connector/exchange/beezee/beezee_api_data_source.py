@@ -19,7 +19,6 @@ from hummingbot.connector.exchange.beezee.beezee_tx import (
 )
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeMarket,
-    chain_amount_to_display,
     chain_price_to_display,
     display_amount_to_chain,
     display_price_to_chain,

@@ -1,6 +1,10 @@
 from typing import Any, Dict, List
 
-from hummingbot.connector.exchange.beezee.beezee_utils import BeezeeMarket, chain_amount_to_display, chain_price_to_display
+from hummingbot.connector.exchange.beezee.beezee_utils import (
+    BeezeeMarket,
+    chain_amount_to_display,
+    chain_price_to_display,
+)
 from hummingbot.core.data_type.common import TradeType
 from hummingbot.core.data_type.order_book import OrderBook
 from hummingbot.core.data_type.order_book_message import OrderBookMessage, OrderBookMessageType

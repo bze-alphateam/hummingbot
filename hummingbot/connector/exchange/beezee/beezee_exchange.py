@@ -1,11 +1,10 @@
+import time
 from collections import defaultdict
 from decimal import Decimal
-import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hummingbot.connector.constants import s_decimal_NaN
-from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
-from hummingbot.connector.exchange.beezee import beezee_web_utils as web_utils
+from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS, beezee_web_utils as web_utils
 from hummingbot.connector.exchange.beezee.beezee_api_data_source import BeezeeAPIDataSource
 from hummingbot.connector.exchange.beezee.beezee_api_order_book_data_source import BeezeeAPIOrderBookDataSource
 from hummingbot.connector.exchange.beezee.beezee_api_user_stream_data_source import BeezeeAPIUserStreamDataSource

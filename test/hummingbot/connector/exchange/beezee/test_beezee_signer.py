@@ -10,12 +10,12 @@ from hummingbot.connector.exchange.beezee.beezee_signer import BeezeeSigner, bec
 class BeezeeSignerTests(unittest.TestCase):
     # Public test vectors (never real keys): addresses produced by `bzed keys import-hex` (bze v8.2.0).
     BZED_ADDRESS_VECTORS = {
-        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f": "bze185p2ew8xztcuyame8g3j7g9kj058wq8rwmn23u",
-        "0000000000000000000000000000000000000000000000000000000000000001": "bze1w508d6qejxtdg4y5r3zarvary0c5xw7k8em3a0",
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f": "bze185p2ew8xztcuyame8g3j7g9kj058wq8rwmn23u",  # noqa: mock
+        "0000000000000000000000000000000000000000000000000000000000000001": "bze1w508d6qejxtdg4y5r3zarvary0c5xw7k8em3a0",  # noqa: mock
     }
 
     def test_address_uses_legacy_cosmos_sdk_ripemd160_sha256(self):
-        private_key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+        private_key_hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"  # noqa: mock
 
         signer = BeezeeSigner(private_key_hex, "bze")
 

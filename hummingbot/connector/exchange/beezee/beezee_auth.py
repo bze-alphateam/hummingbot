@@ -8,4 +8,3 @@ class BeezeeAuth(AuthBase):
 
     async def ws_authenticate(self, request: WSRequest) -> WSRequest:
         return request
-

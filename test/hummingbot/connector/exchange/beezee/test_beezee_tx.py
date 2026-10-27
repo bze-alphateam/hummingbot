@@ -45,4 +45,3 @@ class BeezeeTxTests(unittest.TestCase):
         fee_amount = fee_amount_from_gas(gas_limit=250000, gas_price=Decimal("0.025"))
 
         self.assertEqual("6250", fee_amount)
-
