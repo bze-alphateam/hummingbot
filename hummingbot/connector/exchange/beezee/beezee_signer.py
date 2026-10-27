@@ -1,6 +1,7 @@
 import hashlib
 
 import ecdsa
+from Crypto.Hash import RIPEMD160
 
 
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
@@ -45,6 +46,14 @@ def _convertbits(data, from_bits: int, to_bits: int, pad: bool = True):
     return result
 
 
+def ripemd160(data: bytes) -> bytes:
+    # OpenSSL 3 builds may disable the legacy ripemd160 digest in hashlib.
+    try:
+        return hashlib.new("ripemd160", data).digest()
+    except ValueError:
+        return RIPEMD160.new(data).digest()
+
+
 def bech32_encode(hrp: str, payload: bytes) -> str:
     data = _convertbits(payload, 8, 5)
     combined = data + _bech32_create_checksum(hrp, data)
@@ -67,7 +76,7 @@ class BeezeeSigner:
         # Beezee is built on a Cosmos SDK 0.47.x fork, where secp256k1 account
         # addresses are still Bitcoin-style RIPEMD160(SHA256(pubkey)).
         sha_hash = hashlib.sha256(self.public_key_bytes).digest()
-        ripe_hash = hashlib.new("ripemd160", sha_hash).digest()
+        ripe_hash = ripemd160(sha_hash)
         return bech32_encode(self._address_prefix, ripe_hash)
 
     def sign(self, payload: bytes) -> bytes:
