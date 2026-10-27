@@ -24,15 +24,10 @@ Validated on Beezee testnet:
 - signed order submission
 - signed order cancellation
 
-Validated wallet mode:
+Validated wallet modes:
 
 - `account_type=wallet`
-
-Not yet treated as production-safe:
-
-- `account_type=wallet_mnemonic`
-
-Mnemonic mode still needs separate derivation validation before it should be relied on for live trading.
+- `account_type=wallet_mnemonic` (BIP39 to BIP44 derivation checked against `bzed` with the public BIP39 test mnemonic)
 
 ## Configuration model
 
@@ -67,14 +62,16 @@ Wallet mode requires:
 
 - a 32-byte secp256k1 private key in hex
 - an explicit Beezee address
-- gas limits for create/cancel txs
+
+Gas is not configured per tx type: every create and cancel is simulated first (see "Gas and fees" below).
 
 Recommended Beezee testnet values:
 
 - `chain_id=bzetestnet-3`
 - `address_prefix=bze`
 - `native_denom=ubze`
-- `gas_price=0.025`
+- `gas_price=0.01`
+- `gas_adjustment=1.3`
 
 The current Beezee testnet endpoints used during validation were:
 
@@ -99,14 +96,13 @@ network:
   chain_id: "bzetestnet-3"
   address_prefix: "bze"
   native_denom: "ubze"
-  gas_price: "0.025"
+  gas_price: "0.01"
+  gas_adjustment: "1.3"
 
 account_type:
   name: "wallet"
   private_key: "replace-with-32-byte-hex-private-key"
   address: "bze1..."
-  create_order_gas_limit: 250000
-  cancel_order_gas_limit: 200000
 ```
 
 Example `read_only` mode:
@@ -122,7 +118,8 @@ network:
   chain_id: "bzetestnet-3"
   address_prefix: "bze"
   native_denom: "ubze"
-  gas_price: "0.025"
+  gas_price: "0.01"
+  gas_adjustment: "1.3"
 
 account_type:
   name: "read_only"
@@ -142,7 +139,8 @@ network:
   chain_id: "bzetestnet-3"
   address_prefix: "bze"
   native_denom: "ubze"
-  gas_price: "0.025"
+  gas_price: "0.01"
+  gas_adjustment: "1.3"
 
 account_type:
   name: "wallet_mnemonic"
@@ -150,8 +148,6 @@ account_type:
   passphrase: ""
   hd_path: "m/44'/118'/0'/0/0"
   address: "bze1..."
-  create_order_gas_limit: 250000
-  cancel_order_gas_limit: 200000
 ```
 
 Notes:
@@ -164,9 +160,33 @@ Notes:
 - Beezee does not expose a dedicated private stream, so v1 is polling-based for balances and order state.
 - `HistoryOrder` objects do not include order ids. When the same address has multiple resting orders at the same market, side, and price, fills are allocated FIFO client-side.
 - Tick size and minimum order size are not explicit per-market fields on-chain. v1 derives them from denom exponents and the chain's `CalculateMinAmount(price)` logic.
-- Maker/taker fees are fixed native-denom amounts on-chain, not percentages. The connector models them as flat fees. Gas remains an external tx cost.
+- Maker/taker fees are fixed amounts on-chain, not percentages. The connector models them as flat fees (see "Gas and fees"). Gas remains an external tx cost.
 - Bank balances and `all_user_dust` are available, but no dedicated reserved-balance endpoint was found for open orders.
 - Some token metadata may be unavailable from public testnet endpoints. The connector falls back to raw or synthesized metadata when required, especially for the native `ubze` denom.
+
+## Gas and fees
+
+- Before every broadcast the connector simulates the tx (`/cosmos/tx/v1beta1/simulate`). The gas limit is
+  `ceil(gas_used * gas_adjustment)` and the fee is `ceil(gas_limit * gas_price)` in the native denom.
+- A tx whose simulation fails is never broadcast; the order fails with the chain's message. An account sequence
+  mismatch resets the cached sequence and retries once.
+- `gas_price` defaults to `0.01` (ubze per gas unit), `gas_adjustment` to `1.3`. Raise `gas_price` if your node
+  requires a higher minimum.
+- The old `create_order_gas_limit` / `cancel_order_gas_limit` settings are gone; saved configs that still have them load
+  and ignore them.
+- Tradebin maker/taker fees come from `/bze/tradebin/params` (Coin objects on chain v8.2.0, `"1000ubze"` strings on older
+  chains) and are converted with the fee denom's metadata exponent.
+
+## Halted markets
+
+Governance can halt a denom on the DEX. A market is halted when its base or quote denom is halted: cancels still work,
+new orders do not.
+
+- The connector reads `/bze/tradebin/halted_denoms` at start and every 60 s.
+- An order on a halted market is refused before signing.
+- When a tracked market becomes halted, its open orders are cancelled once and one warning is logged.
+- A tx refused with tradebin code 4017 (`denom is halted`) marks the market halted at once.
+- When the denom is no longer halted, the connector logs it once and trades again.
 
 ## Safe/dev workflow
 

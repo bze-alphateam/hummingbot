@@ -56,8 +56,8 @@ def _fee_message(denom: str, amount: str, gas_limit: int) -> bytes:
     return _encode_bytes(1, _coin_message(denom, amount)) + _encode_uint64(2, gas_limit)
 
 
-def _auth_info_message(public_key_bytes: bytes, sequence: int, fee_denom: str, fee_amount: str, gas_limit: int) -> bytes:
-    return _encode_bytes(1, _signer_info_message(public_key_bytes, sequence)) + _encode_bytes(2, _fee_message(fee_denom, fee_amount, gas_limit))
+def _auth_info_message(public_key_bytes: bytes, sequence: int, fee_message: bytes) -> bytes:
+    return _encode_bytes(1, _signer_info_message(public_key_bytes, sequence)) + _encode_bytes(2, fee_message)
 
 
 def _tx_body_message(messages: List[bytes], memo: str = "") -> bytes:
@@ -97,14 +97,35 @@ def build_signed_transaction(
     memo: str = "",
 ) -> bytes:
     body_bytes = _tx_body_message(messages=messages, memo=memo)
-    auth_info_bytes = _auth_info_message(signer.public_key_bytes, sequence, fee_denom, fee_amount, gas_limit)
+    auth_info_bytes = _auth_info_message(signer.public_key_bytes, sequence, _fee_message(fee_denom, fee_amount, gas_limit))
     sign_doc = _sign_doc_message(body_bytes, auth_info_bytes, chain_id, account_number)
     signature = signer.sign(sign_doc)
     return _tx_raw_message(body_bytes, auth_info_bytes, signature)
 
 
+def build_simulation_transaction(
+    public_key_bytes: bytes,
+    sequence: int,
+    messages: List[bytes],
+    memo: str = "",
+) -> bytes:
+    # Same shape as the signed tx, with an empty fee and an empty signature: the chain
+    # skips signature verification in simulate mode but still checks the sequence.
+    body_bytes = _tx_body_message(messages=messages, memo=memo)
+    auth_info_bytes = _auth_info_message(public_key_bytes, sequence, b"")
+    return _tx_raw_message(body_bytes, auth_info_bytes, b"")
+
+
 def build_broadcast_request(tx_bytes: bytes, mode: str = "BROADCAST_MODE_SYNC") -> Dict[str, str]:
     return {"tx_bytes": base64.b64encode(tx_bytes).decode(), "mode": mode}
+
+
+def build_simulate_request(tx_bytes: bytes) -> Dict[str, str]:
+    return {"tx_bytes": base64.b64encode(tx_bytes).decode()}
+
+
+def gas_limit_from_simulation(gas_used: int, gas_adjustment: Decimal) -> int:
+    return int((Decimal(gas_used) * gas_adjustment).to_integral_value(rounding="ROUND_CEILING"))
 
 
 def fee_amount_from_gas(gas_limit: int, gas_price: Decimal) -> str:

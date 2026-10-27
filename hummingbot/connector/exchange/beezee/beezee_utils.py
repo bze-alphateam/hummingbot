@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import ecdsa
 from bidict import bidict
-from pydantic import ConfigDict, Field, SecretStr, field_validator
+from pydantic import ConfigDict, Field, SecretStr, field_validator, model_validator
 
 from hummingbot.client.config.config_data_types import BaseClientModel, BaseConnectorConfigMap
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
@@ -16,16 +16,19 @@ from hummingbot.core.data_type.trade_fee import TokenAmount, TradeFeeSchema
 
 CENTRALIZED = False
 EXAMPLE_PAIR = "BZE-USDC"
+# Static fallback for fee estimates (e.g. paper trading). Mainnet tradebin fees on v8.2.0: 1000ubze maker, 100000ubze
+# taker. The token is the BZE symbol, as balances are keyed by symbol. The live connector reads the fees from the chain.
 DEFAULT_FEES = TradeFeeSchema(
     maker_percent_fee_decimal=Decimal("0"),
     taker_percent_fee_decimal=Decimal("0"),
-    maker_fixed_fees=[TokenAmount(CONSTANTS.MAINNET_NATIVE_DENOM, Decimal("0.001"))],
-    taker_fixed_fees=[TokenAmount(CONSTANTS.MAINNET_NATIVE_DENOM, Decimal("0.1"))],
+    maker_fixed_fees=[TokenAmount("BZE", Decimal("0.001"))],
+    taker_fixed_fees=[TokenAmount("BZE", Decimal("0.1"))],
 )
 
 RE_HEX_PRIVATE_KEY = re.compile(r"^(?:0x)?[0-9a-fA-F]{64}$")
 RE_BIP32_PATH = re.compile(r"^m(?:/[0-9]+'?)+$")
 BZE_ENCRYPTED_SECRET_HEX = re.compile(r"^[0-9a-fA-F]+$")
+RE_LEGACY_COIN = re.compile(r"^([0-9]+)([a-zA-Z][a-zA-Z0-9/:._-]*)$")
 BIP39_WORD_COUNTS = {12, 15, 18, 21, 24}
 COSMOS_HUB_DERIVATION_PATH = "m/44'/118'/0'/0/0"
 
@@ -219,6 +222,30 @@ def chain_price_to_display(price: Union[str, Decimal], market: BeezeeMarket) -> 
     return Decimal(str(price)) * market.chain_price_scaler
 
 
+def parse_coin(raw: Any) -> Optional[Tuple[str, int]]:
+    """Parses a tradebin fee param into (denom, amount).
+
+    Chain v8.2.0 returns a Coin object ({"denom": "ubze", "amount": "1000"}); older chains a "1000ubze" string.
+    """
+    if isinstance(raw, dict):
+        denom, amount = raw.get("denom"), raw.get("amount")
+        if not denom or amount is None:
+            return None
+        return denom, int(str(amount))
+    if isinstance(raw, str):
+        match = RE_LEGACY_COIN.match(raw.strip())
+        if match is None:
+            return None
+        return match.group(2), int(match.group(1))
+    return None
+
+
+def drop_legacy_gas_limits(values: Any) -> Any:
+    if isinstance(values, dict):
+        return {key: value for key, value in values.items() if key not in CONSTANTS.LEGACY_GAS_LIMIT_CONFIG_KEYS}
+    return values
+
+
 def minimum_order_size_for_price(chain_price: Union[str, Decimal], market: BeezeeMarket) -> Decimal:
     price = Decimal(str(chain_price))
     if price <= Decimal("0"):
@@ -235,6 +262,7 @@ class BeezeeMainnetNetworkMode(BaseClientModel):
     address_prefix: str = CONSTANTS.MAINNET_ADDRESS_PREFIX
     native_denom: str = CONSTANTS.MAINNET_NATIVE_DENOM
     gas_price: Decimal = CONSTANTS.DEFAULT_GAS_PRICE
+    gas_adjustment: Decimal = CONSTANTS.DEFAULT_GAS_ADJUSTMENT
     model_config = ConfigDict(title="mainnet")
 
 
@@ -267,6 +295,10 @@ class BeezeeTestnetNetworkMode(BaseClientModel):
         default=CONSTANTS.DEFAULT_GAS_PRICE,
         json_schema_extra={"prompt": "Enter the Beezee testnet gas price", "prompt_on_new": True},
     )
+    gas_adjustment: Decimal = Field(
+        default=CONSTANTS.DEFAULT_GAS_ADJUSTMENT,
+        json_schema_extra={"prompt": "Enter the Beezee testnet gas adjustment (multiplier on simulated gas)", "prompt_on_new": True},
+    )
     model_config = ConfigDict(title="testnet")
 
 
@@ -278,6 +310,7 @@ class BeezeeCustomNetworkMode(BaseClientModel):
     address_prefix: str = Field(default="bze", json_schema_extra={"prompt": "Enter the Beezee bech32 prefix", "prompt_on_new": True})
     native_denom: str = Field(default="ubze", json_schema_extra={"prompt": "Enter the Beezee native fee denom", "prompt_on_new": True})
     gas_price: Decimal = Field(default=CONSTANTS.DEFAULT_GAS_PRICE, json_schema_extra={"prompt": "Enter the Beezee gas price", "prompt_on_new": True})
+    gas_adjustment: Decimal = Field(default=CONSTANTS.DEFAULT_GAS_ADJUSTMENT, json_schema_extra={"prompt": "Enter the Beezee gas adjustment (multiplier on simulated gas)", "prompt_on_new": True})
     model_config = ConfigDict(title="custom")
 
 
@@ -300,9 +333,12 @@ class BeezeeWalletAccountMode(BaseClientModel):
         },
     )
     address: Optional[str] = Field(default=None, json_schema_extra={"prompt": "Enter your Beezee address (optional)", "prompt_on_new": True})
-    create_order_gas_limit: int = CONSTANTS.DEFAULT_CREATE_ORDER_GAS_LIMIT
-    cancel_order_gas_limit: int = CONSTANTS.DEFAULT_CANCEL_ORDER_GAS_LIMIT
     model_config = ConfigDict(title="wallet")
+
+    @model_validator(mode="before")
+    @classmethod
+    def ignore_legacy_gas_limits(cls, values: Any):
+        return drop_legacy_gas_limits(values)
 
     @field_validator("private_key", mode="before")
     @classmethod
@@ -343,9 +379,12 @@ class BeezeeMnemonicWalletAccountMode(BaseClientModel):
         },
     )
     address: Optional[str] = Field(default=None, json_schema_extra={"prompt": "Enter your Beezee address (optional)", "prompt_on_new": True})
-    create_order_gas_limit: int = CONSTANTS.DEFAULT_CREATE_ORDER_GAS_LIMIT
-    cancel_order_gas_limit: int = CONSTANTS.DEFAULT_CANCEL_ORDER_GAS_LIMIT
     model_config = ConfigDict(title="wallet_mnemonic")
+
+    @model_validator(mode="before")
+    @classmethod
+    def ignore_legacy_gas_limits(cls, values: Any):
+        return drop_legacy_gas_limits(values)
 
     @field_validator("mnemonic", mode="before")
     @classmethod

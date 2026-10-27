@@ -4,7 +4,10 @@ from decimal import Decimal
 
 from hummingbot.connector.exchange.beezee.beezee_tx import (
     build_broadcast_request,
+    build_simulate_request,
+    build_simulation_transaction,
     fee_amount_from_gas,
+    gas_limit_from_simulation,
     msg_cancel_order,
     msg_create_order,
 )
@@ -45,3 +48,16 @@ class BeezeeTxTests(unittest.TestCase):
         fee_amount = fee_amount_from_gas(gas_limit=250000, gas_price=Decimal("0.025"))
 
         self.assertEqual("6250", fee_amount)
+
+    def test_gas_limit_from_simulation_rounds_up(self):
+        self.assertEqual(130002, gas_limit_from_simulation(gas_used=100001, gas_adjustment=Decimal("1.3")))
+        self.assertEqual(130000, gas_limit_from_simulation(gas_used=100000, gas_adjustment=Decimal("1.3")))
+
+    def test_simulation_transaction_has_empty_fee_and_signature(self):
+        tx_bytes = build_simulation_transaction(b"\x02" * 33, sequence=5, messages=[b"msg"])
+
+        # TxRaw ends with field 3 (signatures) holding one empty signature.
+        self.assertTrue(tx_bytes.endswith(b"\x1a\x00"))
+        # AuthInfo field 2 (fee) is present and empty.
+        self.assertIn(b"\x12\x00", tx_bytes)
+        self.assertEqual({"tx_bytes": base64.b64encode(tx_bytes).decode()}, build_simulate_request(tx_bytes))

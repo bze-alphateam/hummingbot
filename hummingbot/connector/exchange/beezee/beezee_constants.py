@@ -35,6 +35,8 @@ DENOM_METADATA_BY_QUERY_PATH_URL = "/cosmos/bank/v1beta1/denoms_metadata_by_quer
 ACCOUNT_INFO_PATH_URL = "/cosmos/auth/v1beta1/accounts"
 GET_TX_PATH_URL = "/cosmos/tx/v1beta1/txs"
 BROADCAST_TX_PATH_URL = "/cosmos/tx/v1beta1/txs"
+SIMULATE_TX_PATH_URL = "/cosmos/tx/v1beta1/simulate"
+HALTED_DENOMS_PATH_URL = "/bze/tradebin/halted_denoms"
 
 SIDE_BUY = "buy"
 SIDE_SELL = "sell"
@@ -50,10 +52,17 @@ DEFAULT_PRICE_SIG_DIGITS = 10
 DEFAULT_ORDER_BOOK_POLL_INTERVAL = 5.0
 DEFAULT_BLOCK_STREAM_TIMEOUT = 20.0
 
-DEFAULT_GAS_PRICE = Decimal("0.025")
-DEFAULT_CREATE_ORDER_GAS_LIMIT = 250000
-DEFAULT_CANCEL_ORDER_GAS_LIMIT = 200000
-DEFAULT_GAS_ADJUSTMENT = Decimal("1.20")
+# Mainnet public-node minimum gas price (ubze per gas unit) on chain v8.2.0.
+DEFAULT_GAS_PRICE = Decimal("0.01")
+DEFAULT_GAS_ADJUSTMENT = Decimal("1.3")
+# Legacy fixed gas limits, replaced by tx simulation. Still accepted (and ignored) in saved configs.
+LEGACY_GAS_LIMIT_CONFIG_KEYS = ("create_order_gas_limit", "cancel_order_gas_limit")
+
+HALTED_DENOMS_REFRESH_INTERVAL = 60.0
+TRADEBIN_CODESPACE = "tradebin"
+DENOM_HALTED_ERROR_CODE = 4017
+DENOM_HALTED_ERROR_MESSAGE = "denom is halted"
+ACCOUNT_SEQUENCE_MISMATCH_MESSAGE = "account sequence mismatch"
 
 GENERAL_LIMIT_ID = "beezee_general"
 QUERY_LIMIT_ID = "beezee_query"
@@ -87,5 +96,7 @@ RATE_LIMITS = [
     RateLimit(limit_id=DENOM_METADATA_BY_QUERY_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
     RateLimit(limit_id=ACCOUNT_INFO_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
     RateLimit(limit_id=GET_TX_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
+    RateLimit(limit_id=SIMULATE_TX_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
+    RateLimit(limit_id=HALTED_DENOMS_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
     RateLimit(limit_id=BROADCAST_TX_PATH_URL, limit=30, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(TX_LIMIT_ID, 1)]),
 ]

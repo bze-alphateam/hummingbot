@@ -72,3 +72,19 @@ Inside the Hummingbot client:
 3. Create a strategy or a script with `beezee` as the exchange, e.g. the pair `BZE-USDC`.
 
 Use a dedicated trading wallet that holds only the funds the bot should trade with.
+
+## Connector behaviour on chain v8.2.0
+
+- **Wallet modes.** `wallet` takes a hex private key. `wallet_mnemonic` takes a BIP39 mnemonic (optional passphrase)
+  and derives the key on `hd_path`, default `m/44'/118'/0'/0/0`, the same as `bzed keys add --recover`. The
+  derivation is pinned by a test against the address `bzed` v8.2.0 recovers from the public BIP39 test mnemonic.
+- **Gas.** Every create and cancel is simulated first. Gas limit = `ceil(gas_used × gas_adjustment)`, fee =
+  `ceil(gas limit × gas_price)` in ubze. Defaults: `gas_price` `0.01` (the mainnet public-node minimum),
+  `gas_adjustment` `1.3`. Both are network settings. A failed simulation is never broadcast. The fixed
+  `create_order_gas_limit` / `cancel_order_gas_limit` settings are gone, and old configs that still have them load
+  and ignore them.
+- **Trading fees.** The tradebin maker/taker fees (flat amounts, in ubze on mainnet) are read from the chain params
+  and added to every order's fee estimate, so PnL and profitability checks include them.
+- **Halted markets.** A market whose base or quote denom is halted by governance is exit-only: the connector refuses
+  new orders on it, cancels its open orders once when the halt starts, and trades again once the halt is lifted. The
+  halted list is read at start and every 60 s, and a tx refused with `denom is halted` takes effect at once.
