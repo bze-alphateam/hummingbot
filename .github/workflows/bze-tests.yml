@@ -1,0 +1,50 @@
+name: bze tests
+
+on:
+  push:
+    branches: [bze]
+  pull_request:
+    branches: [bze]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bze-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Unit tests (full upstream suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache conda dependencies
+        id: conda-dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            /home/runner/conda_pkgs_dir/
+            /usr/share/miniconda/envs
+          key: ${{ runner.os }}-bze-conda-${{ hashFiles('setup/environment.yml') }}
+
+      - name: Install environment and Hummingbot
+        uses: ./.github/actions/install_env_and_hb
+        with:
+          program-cache-hit: 'false'
+          dependencies-cache-hit: ${{ steps.conda-dependencies.outputs.cache-hit }}
+
+      - name: BeeZee connector tests
+        shell: bash
+        run: |
+          source $CONDA/etc/profile.d/conda.sh
+          conda activate hummingbot
+          python -m pytest test/hummingbot/connector/exchange/beezee
+
+      - name: Full upstream suite
+        shell: bash
+        run: |
+          source $CONDA/etc/profile.d/conda.sh
+          conda activate hummingbot
+          make test

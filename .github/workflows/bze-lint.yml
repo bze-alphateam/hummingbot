@@ -1,0 +1,35 @@
+name: bze lint
+
+on:
+  push:
+    branches: [bze]
+  pull_request:
+    branches: [bze]
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    name: pre-commit on changed files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run pre-commit hooks on diff
+        shell: bash
+        run: |
+          pip install pre-commit
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            files=$(git diff --name-only --diff-filter=d origin/${{ github.base_ref }}...HEAD)
+          else
+            files=$(git diff --name-only --diff-filter=d ${{ github.event.before }} HEAD)
+          fi
+          [ -z "$files" ] && exit 0
+          pre-commit run --show-diff-on-failure --files $files
