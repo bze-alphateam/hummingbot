@@ -1,0 +1,38 @@
+# Example Beezee connector configuration reference for a standalone Hummingbot installation.
+# This file shows the effective config shape used by the Beezee connector.
+# Secure values such as private keys and mnemonics should normally be entered through
+# `connect beezee` so Hummingbot can encrypt them when persisting the connector config.
+
+connector: beezee
+receive_connector_configuration: true
+
+network:
+  rest_endpoint: "https://your-beezee-testnet-rest.example"
+  rpc_endpoint: "https://your-beezee-testnet-rpc.example"
+  websocket_endpoint: "wss://your-beezee-testnet-rpc.example/websocket"
+  chain_id: "bzetestnet-3"
+  address_prefix: "bze"
+  native_denom: "ubze"
+  gas_price: "0.025"
+
+account_type:
+  name: "wallet"
+  private_key: "replace with 32-byte hex private key"
+  address: "bze1..."
+  create_order_gas_limit: 250000
+  cancel_order_gas_limit: 200000
+
+# Alternatives:
+#
+# account_type:
+#   name: "wallet_mnemonic"
+#   mnemonic: "replace with your 12 or 24 word mnemonic"
+#   passphrase: ""
+#   hd_path: "m/44'/118'/0'/0/0"
+#   address: "bze1..."
+#   create_order_gas_limit: 250000
+#   cancel_order_gas_limit: 200000
+#
+# account_type:
+#   name: "read_only"
+#   address: "bze1..."
