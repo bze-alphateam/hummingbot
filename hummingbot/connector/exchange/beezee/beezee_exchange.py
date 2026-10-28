@@ -130,6 +130,7 @@ class BeezeeExchange(ExchangePyBase):
 
         self._data_source: Optional[BeezeeAPIDataSource] = None
         self._trade_fees: Dict[str, Optional[TokenAmount]] = {}
+        self._markets_by_trading_pair: Dict[str, BeezeeMarket] = {}
         self._halted_denoms: Set[str] = set()
         self._halted_denoms_loaded = False
         self._last_halted_denoms_refresh = 0.0
@@ -230,6 +231,18 @@ class BeezeeExchange(ExchangePyBase):
     @property
     def ready(self) -> bool:
         return all(self.status_dict.values())
+
+    def gas_fees_paid(self) -> Decimal:
+        """Gas fees of every tx this connector broadcast since it started, in the native token (BZE)."""
+        return self._build_data_source().gas_fees_paid
+
+    def minimum_order_amount(self, trading_pair: str, price: Decimal) -> Decimal:
+        """The chain's minimum order size at `price`, in base display units: ceil(1 / chain price) x 2 base units.
+        Zero while the market is not loaded yet (the trading rules load it)."""
+        market = self._markets_by_trading_pair.get(trading_pair)
+        if market is None:
+            return Decimal("0")
+        return minimum_order_size_for_price(display_price_to_chain(price, market), market)
 
     def supported_order_types(self):
         return [OrderType.LIMIT]
@@ -586,6 +599,7 @@ class BeezeeExchange(ExchangePyBase):
     async def _format_trading_rules(self, exchange_info_dict: Dict[str, Any]) -> List[TradingRule]:
         data_source = self._build_data_source()
         markets = await data_source.get_all_markets(refresh=True)
+        self._markets_by_trading_pair = {market.trading_pair: market for market in markets.values()}
         self._trade_fees = await data_source.get_trade_fees()
         return [
             TradingRule(

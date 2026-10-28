@@ -1,0 +1,58 @@
+#########################################################
+###  Volume target on BeeZee mainnet: BZE/USDC.inj    ###
+#########################################################
+# Copy to conf/scripts/beezee_volume_target.yml, set the volume and the fee cap, then
+#   start --script beezee_volume_target.py --conf beezee_volume_target.yml
+# Every cycle_seconds the script sells and buys the same amount at the same price, strictly inside the current
+# spread, in one tx: the two orders fill each other, so it never trades with anyone else. Fees and gas are the cost.
+# How it works and what it costs: README_BZE.md, section "Volume target".
+# Network: beezee-1. In `connect beezee` pick network `mainnet` (gas price 0.01 ubze).
+
+script_file_name: beezee_volume_target.py
+controllers_config: []
+
+exchange: beezee
+
+# BZE quoted in USDC bridged from Injective (USDC.inj), market id
+#   ubze/ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838
+# The chain's metadata gives USDC.inj no display unit, so the bot counts it in base units (1 = 0.000001 USDC) and
+# quotes BZE at about 333 of them (0.000333 USDC). Volumes below are in the same units.
+trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+
+# Volume to print per UTC day, in USDC.inj base units: 20000000 = 20 USDC. A self-filled trade counts once.
+# Placeholder: set your own target.
+daily_volume_quote: 20000000
+
+# One self-filled trade per cycle. 300 s = 288 cycles a day.
+cycle_seconds: 300
+
+# Bounds of one leg, in BZE. Each cycle trades (volume still to do today / cycles left today), clamped to these and
+# raised to the chain minimum at the trade price (ceil(1 / chain price) x 2 ubze, about 0.006 BZE at 0.000333).
+# Both legs need the balance: the sell leg BZE, the buy leg USDC.inj, plus BZE for fees and gas.
+min_order_amount: 1
+max_order_amount: 5000
+
+# Tradebin fees + gas per UTC day, in BZE. Reaching it stops the script until UTC midnight.
+# One cycle pays the maker fee (0.001 BZE) on the leg that rests, the taker fee (0.1 BZE) on the leg that fills it
+# and the gas of one tx (a few thousandths of a BZE): about 0.105 BZE, so about 30 BZE a day at 300 s.
+max_daily_fee_spend: 35
+
+# Price anchor: the volume-weighted price of BZE on CoinGecko's external venues, divided by USDC's price.
+# CoinGecko's own BZE price includes BeeZee DEX, which this script would come to dominate, so those tickers are
+# left out. An optional CoinGecko API key comes from the COINGECKO_API_KEY env var (demo tier; set
+# COINGECKO_API_TIER=PRO for a pro key), never from this file.
+coingecko_id_base: bzedge
+coingecko_id_quote: usd-coin
+exclude_markets:
+  - BeeZee DEX
+# CoinGecko gives USDC per BZE; the bot counts USDC.inj in base units, so x 1000000.
+anchor_price_scale: 1000000
+# 300 s fits the public API's rate limit (two requests per refresh).
+anchor_refresh_seconds: 300
+anchor_max_age_seconds: 1800
+# Without a fresh anchor (no coingecko_id_base, or the last one is older than anchor_max_age_seconds):
+#   book_mid = trade at the mid of the best bid and ask; pause = skip cycles until the anchor is back.
+anchor_fallback: book_mid
+# Pause while the book mid is more than this % away from the anchor: prints there would show an off-market price.
+# Not checked on the book_mid fallback.
+max_anchor_deviation_pct: 5
