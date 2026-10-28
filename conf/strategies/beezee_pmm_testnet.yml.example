@@ -1,0 +1,54 @@
+########################################################
+###  Pure market making on the BeeZee testnet        ###
+########################################################
+# Copy to conf/strategies/beezee_pmm_testnet.yml, set order_amount, then `import beezee_pmm_testnet.yml`.
+# Network: bzetestnet-3. In `connect beezee` pick network `testnet` and enter
+#   REST https://testnet.getbze.com, RPC https://testnet-rpc.getbze.com, gas price 0.001 (testnet node minimum).
+# The run guide is in README_BZE.md, section "Testnet run".
+
+template_version: 24
+strategy: pure_market_making
+
+exchange: beezee
+
+# The only testnet market: ULMN (IBC token, exponent 0) quoted in TUSDC (factory test dollar, exponent 6).
+# Market id: ibc/9DA252F9F9C86132CC282EA431DFB7DE7729501F6DC9A3E0F50EC8C6EE380CC7/factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd
+# Fund the wallet by swapping testnet BZE for ULMN and TUSDC in the dex app's pools.
+market: ULMN-TUSDC
+
+bid_spread: 1.0
+ask_spread: 1.0
+minimum_spread: -100
+order_refresh_time: 30
+max_order_age: 1800
+order_refresh_tolerance_pct: 0.2
+
+# ULMN per order. The chain's minimum order is ceil(1 / chain price) x 2 base units (ulmn = ULMN here),
+# with chain price = TUSDC base units per ulmn (e.g. 0.26 -> 8 ULMN).
+# Check it against the lowest bid level, the cheapest price this config places. 1000 ULMN is well above it.
+order_amount: 1000
+
+price_ceiling: -1
+price_floor: -1
+moving_price_band_enabled: false
+ping_pong_enabled: false
+
+inventory_skew_enabled: true
+inventory_target_base_pct: 50
+inventory_range_multiplier: 1
+
+order_levels: 5
+order_level_amount: 0
+order_level_spread: 0.5
+filled_order_delay: 30
+
+hanging_orders_enabled: false
+order_optimization_enabled: false
+add_transaction_costs: false
+
+# Prices come from the BeeZee book itself. Hummingbot cannot start on an empty book: seed one bid and one ask first
+# (see README_BZE.md, "Seeding the book").
+price_source: current_market
+price_type: mid_price
+
+should_wait_order_cancel_confirmation: true
