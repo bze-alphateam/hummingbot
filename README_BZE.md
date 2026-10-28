@@ -89,3 +89,13 @@ Use a dedicated trading wallet that holds only the funds the bot should trade wi
   new orders on it, cancels its open orders (and keeps cancelling any still open while the halt lasts), and trades
   again once the halt is lifted. The halted list is read at start and every 60 s, and a tx refused with
   `denom is halted` takes effect at once.
+- **Order tracking.** The order book is asynchronous: a tx only queues the order, and the chain executes it in that
+  block or a later one. The connector looks up each create/cancel tx for its queue `message_id`, then reads the blocks
+  (RPC `/block_results`) for the events carrying that id: fills, the saved order and its id, the cancel. A resting
+  order's later fills are matched by its order id. An order with no outcome within 20 blocks of its tx is marked
+  failed. A partial fill whose rest the chain refunds ends `CANCELED` with its fills. After a restart, missed fills
+  are read back from the last processed block (up to 1000 blocks); beyond that the connector reconciles resting
+  orders from the chain and logs a warning. The RPC endpoint must serve `/block_results` for recent heights.
+- **Fee bookkeeping.** The chain charges the tradebin fee once per order when the create runs, so the connector books
+  it on the order's first fill only. An order that rests and never fills still paid the maker fee, which Hummingbot
+  cannot record without a fill.

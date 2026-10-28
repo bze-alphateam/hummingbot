@@ -96,20 +96,6 @@ class BeezeeAPIDataSourceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(price)
 
-    def test_candidate_order_ids_filters_by_market_and_side(self):
-        candidate_ids = self.data_source.candidate_order_ids(
-            refs=[
-                {"id": "0002", "market_id": "ubze/uusdc", "order_type": "buy"},
-                {"id": "0001", "market_id": "ubze/uusdc", "order_type": "buy"},
-                {"id": "0003", "market_id": "ubze/uusdc", "order_type": "sell"},
-                {"id": "9999", "market_id": "uatom/uusdc", "order_type": "buy"},
-            ],
-            market_id="ubze/uusdc",
-            order_type="buy",
-        )
-
-        self.assertEqual(["0002", "0001"], candidate_ids)
-
     def test_fingerprint_history_trade_is_stable(self):
         trade = {
             "executed_at": "1710000000",

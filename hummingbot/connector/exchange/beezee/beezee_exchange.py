@@ -1,6 +1,7 @@
 import asyncio
 import time
 from collections import defaultdict
+from dataclasses import asdict, dataclass
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -14,13 +15,13 @@ from hummingbot.connector.exchange.beezee.beezee_api_data_source import (
 from hummingbot.connector.exchange.beezee.beezee_api_order_book_data_source import BeezeeAPIOrderBookDataSource
 from hummingbot.connector.exchange.beezee.beezee_api_user_stream_data_source import BeezeeAPIUserStreamDataSource
 from hummingbot.connector.exchange.beezee.beezee_auth import BeezeeAuth
+from hummingbot.connector.exchange.beezee.beezee_events import TradebinEvent, block_tradebin_events, tx_tradebin_events
 from hummingbot.connector.exchange.beezee.beezee_signer import BeezeeSigner
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeConfigMap,
     BeezeeMarket,
     chain_amount_to_display,
     chain_price_to_display,
-    display_amount_to_chain,
     display_price_to_chain,
     minimum_order_size_for_price,
     private_key_from_account_mode,
@@ -36,6 +37,42 @@ from hummingbot.core.data_type.user_stream_tracker_data_source import UserStream
 from hummingbot.core.utils.async_utils import safe_ensure_future
 from hummingbot.core.web_assistant.auth import AuthBase
 from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
+
+
+@dataclass
+class QueuedOrderMessage:
+    """A create or cancel message the account queued in a tx, followed until its outcome event.
+
+    The tradebin order book is asynchronous: the tx only queues the message and the EndBlock queue executes it in
+    the tx block or a later one. Chain v8.2.0 tags the tx event and every outcome event with the queue `message_id`.
+    """
+
+    client_order_id: str
+    tx_hash: str
+    # Creates: index of the message among the account's create messages in the tx. None after a restart from a
+    # saved state without it; the message is then matched by its market, side, amount and price.
+    msg_index: Optional[int] = None
+    # Cancels: the exchange order id being cancelled.
+    order_id: Optional[str] = None
+    tx_height: Optional[int] = None
+    message_id: Optional[str] = None
+    # Next block to scan for the outcome.
+    next_height: Optional[int] = None
+
+    @property
+    def last_height(self) -> int:
+        return self.tx_height + CONSTANTS.ORDER_OUTCOME_BLOCK_WINDOW - 1
+
+    def in_window(self, height: int) -> bool:
+        # Blocks are taken one at a time from next_height on, so a message never jumps over its outcome block.
+        return self.tx_height is not None and height == self.next_height and height <= self.last_height
+
+    def to_json(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_json(cls, data: Dict[str, Any]) -> "QueuedOrderMessage":
+        return cls(**{key: data.get(key) for key in cls.__dataclass_fields__})
 
 
 class BeezeeExchange(ExchangePyBase):
@@ -93,12 +130,17 @@ class BeezeeExchange(ExchangePyBase):
         self._refused_halted_market_ids: Set[str] = set()
         self._halted_trading_pairs: Dict[str, str] = {}
         self._halt_cancel_tasks: Dict[str, asyncio.Task] = {}
-        self._creation_tx_hashes: Dict[str, str] = {}
-        self._cancel_tx_hashes: Dict[str, str] = {}
-        self._pre_create_order_ids: Dict[str, Set[str]] = {}
-        self._create_order_specs: Dict[str, Tuple[str, str, str, str]] = {}
-        self._processed_trade_ids_by_order: Dict[str, Set[str]] = defaultdict(set)
-        self._last_unresolved_order_log_timestamp: Dict[str, float] = {}
+        self._queued_creates: Dict[str, QueuedOrderMessage] = {}
+        self._queued_cancels: Dict[str, QueuedOrderMessage] = {}
+        self._tx_lookup_tasks: Dict[Tuple[bool, str], asyncio.Task] = {}
+        self._last_processed_height: Optional[int] = None
+        self._block_events_cache: Dict[int, List[TradebinEvent]] = {}
+        self._block_processing_lock = asyncio.Lock()
+        # Resting orders restored from a saved state, checked against UserMarketOrders once fills are caught up.
+        self._orders_to_verify: Set[str] = set()
+        # Orders whose fills up to a height were taken from the chain state instead of block events.
+        self._fills_counted_through: Dict[str, int] = {}
+        self._block_read_failures: Dict[int, int] = {}
         self._last_status_log_timestamp = 0.0
 
         super().__init__(balance_asset_limit=balance_asset_limit, rate_limits_share_pct=rate_limits_share_pct)
@@ -198,6 +240,7 @@ class BeezeeExchange(ExchangePyBase):
                 account_address=self._account_address,
                 signer=self._signer,
                 gas_adjustment=self._gas_adjustment,
+                rpc_endpoint=self._rpc_endpoint,
             )
         return self._data_source
 
@@ -210,6 +253,7 @@ class BeezeeExchange(ExchangePyBase):
             data_source=self._build_data_source(),
             api_factory=self._web_assistants_factory,
             websocket_endpoint=self._websocket_endpoint,
+            block_listener=self._on_new_block,
         )
 
     def _create_user_stream_data_source(self) -> UserStreamTrackerDataSource:
@@ -253,14 +297,6 @@ class BeezeeExchange(ExchangePyBase):
         if amount < minimum_amount:
             raise ValueError(f"Beezee minimum size at price {price} is {minimum_amount} {market.base.symbol}.")
         side = CONSTANTS.SIDE_BUY if trade_type is TradeType.BUY else CONSTANTS.SIDE_SELL
-        existing_orders = await data_source.get_user_market_orders(market.market_id)
-        self._pre_create_order_ids[order_id] = {order["id"] for order in existing_orders if "id" in order}
-        self._create_order_specs[order_id] = (
-            market.market_id,
-            side,
-            display_amount_to_chain(amount, market.base),
-            chain_price,
-        )
         try:
             response = await data_source.broadcast_create_order(
                 market=market,
@@ -274,7 +310,8 @@ class BeezeeExchange(ExchangePyBase):
                 await self._mark_market_halted_by_chain(market)
             raise IOError(f"Beezee order create failed: {error.chain_message}") from error
         tx_hash = response["tx_response"]["txhash"]
-        self._creation_tx_hashes[order_id] = tx_hash
+        # The tx hash stays the order's exchange id until the chain saves the order and gives it an id.
+        self._queue_message(QueuedOrderMessage(client_order_id=order_id, tx_hash=tx_hash, msg_index=0), is_cancel=False)
         self.logger().info(
             f"Beezee create order transaction submitted. client_order_id={order_id}, "
             f"market={market.market_id}, side={side}, tx_hash={tx_hash}"
@@ -288,13 +325,12 @@ class BeezeeExchange(ExchangePyBase):
         market = await data_source.get_market_by_trading_pair(tracked_order.trading_pair)
         exchange_order_id = tracked_order.exchange_order_id
         if not exchange_order_id or len(exchange_order_id) != CONSTANTS.ORDER_ID_LENGTH:
-            status_update = await self._request_order_status(tracked_order)
-            exchange_order_id = status_update.exchange_order_id
-        if not exchange_order_id or len(exchange_order_id) != CONSTANTS.ORDER_ID_LENGTH:
             self.logger().debug(
-                f"Deferring Beezee cancel until the exchange order id is resolved. client_order_id={order_id}"
+                f"Deferring Beezee cancel until the chain saves the order. client_order_id={order_id}"
             )
             return False
+        if order_id in self._queued_cancels:
+            return True
 
         try:
             response = await data_source.broadcast_cancel_order(
@@ -306,7 +342,10 @@ class BeezeeExchange(ExchangePyBase):
         except BeezeeTxRefusedError as error:
             raise IOError(f"Beezee cancel failed: {error.chain_message}") from error
         tx_hash = response["tx_response"]["txhash"]
-        self._cancel_tx_hashes[order_id] = tx_hash
+        self._queue_message(
+            QueuedOrderMessage(client_order_id=order_id, tx_hash=tx_hash, order_id=exchange_order_id),
+            is_cancel=True,
+        )
         self.logger().info(
             f"Beezee cancel order transaction submitted. client_order_id={order_id}, "
             f"exchange_order_id={exchange_order_id}, tx_hash={tx_hash}"
@@ -335,6 +374,14 @@ class BeezeeExchange(ExchangePyBase):
 
     async def _update_trading_fees(self):
         self._trade_fees = await self._build_data_source().get_trade_fees()
+
+    async def stop_network(self):
+        await super().stop_network()
+        # Tx lookups and halt cancels are restarted from the saved state by the next status update.
+        for task in list(self._tx_lookup_tasks.values()) + list(self._halt_cancel_tasks.values()):
+            task.cancel()
+        self._tx_lookup_tasks.clear()
+        self._halt_cancel_tasks.clear()
 
     async def _status_polling_loop_fetch_updates(self):
         await super()._status_polling_loop_fetch_updates()
@@ -449,225 +496,625 @@ class BeezeeExchange(ExchangePyBase):
         self._account_balances = dict(totals)
         self._account_available_balances = dict(available)
 
-    async def _update_orders_fills(self, orders: List[InFlightOrder]):
-        grouped_orders: Dict[str, List[InFlightOrder]] = defaultdict(list)
-        for order in orders:
-            grouped_orders[order.trading_pair].append(order)
-        for trading_pair, trading_pair_orders in grouped_orders.items():
-            market = await self._build_data_source().get_market_by_trading_pair(trading_pair)
-            history = await self._build_data_source().get_market_history(market.market_id, limit=CONSTANTS.DEFAULT_HISTORY_LIMIT)
-            trade_updates = self._allocate_trade_updates(trading_pair_orders, market, history)
-            for trade_update in trade_updates:
-                self._order_tracker.process_trade_update(trade_update)
+    # === Order tracking from chain events ===
+    #
+    # Every create and cancel tx is looked up after its broadcast to read the queue `message_id` of its message.
+    # Blocks are then read one by one from RPC `/block_results`: the EndBlock queue emits the outcome of each message
+    # (OrderExecutedEvent, OrderSavedEvent, OrderCanceledEvent) tagged with that `message_id`, and a resting order's
+    # later fills carry its order id. Processing a block twice is harmless: fills are deduplicated by trade id.
 
-    def _allocate_trade_updates(self, orders: List[InFlightOrder], market: BeezeeMarket, history: List[Dict[str, Any]]) -> List[TradeUpdate]:
-        if self._account_address is None:
-            return []
-        updates: List[TradeUpdate] = []
-        buckets: Dict[Tuple[str, str], List[InFlightOrder]] = defaultdict(list)
-        for order in sorted(orders, key=lambda item: (item.creation_timestamp, item.client_order_id)):
-            side = CONSTANTS.SIDE_BUY if order.trade_type is TradeType.BUY else CONSTANTS.SIDE_SELL
-            buckets[(side, format(order.price, "f"))].append(order)
-        for (side, display_price), bucket_orders in buckets.items():
-            first_creation_timestamp = bucket_orders[0].creation_timestamp
-            matching_trades = [
-                trade
-                for trade in history
-                if float(trade["executed_at"]) >= first_creation_timestamp
-                and format(chain_price_to_display(trade["price"], market), "f") == display_price
-                and (
-                    (trade.get("maker") == self._account_address and trade.get("order_type") == side)
-                    or (trade.get("taker") == self._account_address and trade.get("order_type") != side)
+    @property
+    def tracking_states(self) -> Dict[str, Any]:
+        states = super().tracking_states
+        states[CONSTANTS.TRACKING_STATE_KEY] = {
+            "last_processed_height": self._last_processed_height,
+            "creates": {client_order_id: message.to_json() for client_order_id, message in self._queued_creates.items()},
+            "cancels": {client_order_id: message.to_json() for client_order_id, message in self._queued_cancels.items()},
+            "fills_counted_through": dict(self._fills_counted_through),
+        }
+        return states
+
+    def restore_tracking_states(self, saved_states: Dict[str, Any]):
+        saved_states = dict(saved_states or {})
+        block_state = saved_states.pop(CONSTANTS.TRACKING_STATE_KEY, None) or {}
+        super().restore_tracking_states(saved_states)
+        self._last_processed_height = block_state.get("last_processed_height")
+        saved_creates = block_state.get("creates") or {}
+        saved_cancels = block_state.get("cancels") or {}
+        self._fills_counted_through = dict(block_state.get("fills_counted_through") or {})
+        for order in self.in_flight_orders.values():
+            client_order_id = order.client_order_id
+            exchange_order_id = order.exchange_order_id or ""
+            if client_order_id in saved_creates:
+                # Created but not yet saved by the chain: resume from the create tx.
+                self._queued_creates[client_order_id] = QueuedOrderMessage.from_json(saved_creates[client_order_id])
+            elif len(exchange_order_id) == CONSTANTS.TX_HASH_LENGTH:
+                # A state saved without the tx details: the create message is matched by its values.
+                self._queued_creates[client_order_id] = QueuedOrderMessage(
+                    client_order_id=client_order_id, tx_hash=exchange_order_id
                 )
-            ]
-            matching_trades.sort(key=lambda trade: (int(trade["executed_at"]), self._build_data_source().fingerprint_history_trade(trade)))
-            order_index = 0
-            for trade in matching_trades:
-                trade_id = self._build_data_source().fingerprint_history_trade(trade)
-                remaining_trade_amount = chain_amount_to_display(trade["amount"], market.base)
-                while remaining_trade_amount > Decimal("0") and order_index < len(bucket_orders):
-                    order = bucket_orders[order_index]
-                    synthetic_trade_id = f"{trade_id}-{order.client_order_id}"
-                    if synthetic_trade_id in self._processed_trade_ids_by_order[order.client_order_id]:
-                        break
-                    remaining_order_amount = order.amount - order.executed_amount_base
-                    if remaining_order_amount <= Decimal("0"):
-                        order_index += 1
+            elif len(exchange_order_id) == CONSTANTS.ORDER_ID_LENGTH:
+                if client_order_id in saved_cancels:
+                    self._queued_cancels[client_order_id] = QueuedOrderMessage.from_json(saved_cancels[client_order_id])
+                self._orders_to_verify.add(client_order_id)
+
+    def _queued_messages(self, is_cancel: bool) -> Dict[str, QueuedOrderMessage]:
+        return self._queued_cancels if is_cancel else self._queued_creates
+
+    def _queue_message(self, message: QueuedOrderMessage, is_cancel: bool):
+        self._queued_messages(is_cancel)[message.client_order_id] = message
+        self._start_tx_lookup(message, is_cancel)
+
+    def _start_tx_lookup(self, message: QueuedOrderMessage, is_cancel: bool):
+        key = (is_cancel, message.client_order_id)
+        task = self._tx_lookup_tasks.get(key)
+        if task is None or task.done():
+            self._tx_lookup_tasks[key] = safe_ensure_future(self._look_up_tx(message, is_cancel))
+
+    async def _look_up_tx(self, message: QueuedOrderMessage, is_cancel: bool):
+        data_source = self._build_data_source()
+        try:
+            for delay in CONSTANTS.TX_LOOKUP_DELAYS:
+                await self._sleep(delay)
+                if self._queued_messages(is_cancel).get(message.client_order_id) is not message:
+                    return
+                # None only when the node answers "not found": a failed request raises and is retried later.
+                tx = await data_source.get_tx(message.tx_hash)
+                tx_response = (tx or {}).get("tx_response")
+                if tx_response:
+                    await self._on_tx_found(message, is_cancel, tx_response)
+                    return
+            await self._on_tx_not_found(message, is_cancel)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.logger().warning(
+                f"Failed to follow Beezee tx {message.tx_hash} (client_order_id={message.client_order_id}). "
+                f"Retrying on the next status update. Error: {error}"
+            )
+
+    async def _on_tx_not_found(self, message: QueuedOrderMessage, is_cancel: bool):
+        waited = int(sum(CONSTANTS.TX_LOOKUP_DELAYS))
+        if is_cancel:
+            self._queued_cancels.pop(message.client_order_id, None)
+            order = self._order_tracker.fetch_tracked_order(message.client_order_id)
+            if order is not None:
+                self.logger().warning(
+                    f"Beezee cancel tx {message.tx_hash} was not found within {waited} s. The order stays open. "
+                    f"client_order_id={message.client_order_id}"
+                )
+                self._update_order_state(order, self._open_state(order))
+        else:
+            await self._settle_create_from_book(message, f"its tx was not found within {waited} s")
+
+    async def _on_tx_found(self, message: QueuedOrderMessage, is_cancel: bool, tx_response: Dict[str, Any]):
+        order = self._order_tracker.fetch_tracked_order(message.client_order_id)
+        if order is None:
+            self._queued_messages(is_cancel).pop(message.client_order_id, None)
+            return
+        code = int(tx_response.get("code", 0))
+        if code != 0:
+            self._queued_messages(is_cancel).pop(message.client_order_id, None)
+            raw_log = tx_response.get("raw_log")
+            if is_cancel:
+                self.logger().warning(
+                    f"Beezee cancel tx {message.tx_hash} failed with code {code}: {raw_log}. The order stays open. "
+                    f"client_order_id={message.client_order_id}"
+                )
+                self._update_order_state(order, self._open_state(order))
+                return
+            if is_denom_halted_error(code, tx_response.get("codespace"), raw_log):
+                market = await self._build_data_source().get_market_by_trading_pair(order.trading_pair)
+                await self._mark_market_halted_by_chain(market)
+            self.logger().warning(
+                f"Beezee create tx {message.tx_hash} failed with code {code}: {raw_log}. "
+                f"client_order_id={message.client_order_id}"
+            )
+            self._update_order_state(order, OrderState.FAILED)
+            return
+
+        events = tx_tradebin_events(tx_response)
+        if is_cancel:
+            event = next(
+                (
+                    event for event in events
+                    if event.type == CONSTANTS.ORDER_CANCEL_MESSAGE_EVENT
+                    and event.get("creator") == self._account_address
+                    and event.get("orderId") == message.order_id
+                ),
+                None,
+            )
+        else:
+            event = await self._create_message_event(message, order, events)
+        if event is None or not event.get("message_id"):
+            self._queued_messages(is_cancel).pop(message.client_order_id, None)
+            kind = "cancel" if is_cancel else "create"
+            self.logger().warning(
+                f"Beezee {kind} tx {message.tx_hash} has no matching order message event. "
+                f"client_order_id={message.client_order_id}"
+            )
+            self._update_order_state(order, self._open_state(order) if is_cancel else OrderState.FAILED)
+            return
+        # Under the lock, so a pass already past the tx height cannot take this message in mid-way.
+        async with self._block_processing_lock:
+            message.tx_height = int(tx_response["height"])
+            message.message_id = event.get("message_id")
+            message.next_height = message.tx_height
+        await self._process_blocks()
+
+    async def _create_message_event(
+        self, message: QueuedOrderMessage, order: InFlightOrder, events: List[TradebinEvent]
+    ) -> Optional[TradebinEvent]:
+        # The tx emits one OrderCreateMessageEvent per create message, in message order.
+        create_events = [
+            event for event in events
+            if event.type == CONSTANTS.ORDER_CREATE_MESSAGE_EVENT and event.get("creator") == self._account_address
+        ]
+        if message.msg_index is not None:
+            return create_events[message.msg_index] if message.msg_index < len(create_events) else None
+        market = await self._build_data_source().get_market_by_trading_pair(order.trading_pair)
+        claimed = {
+            other.message_id for other in self._queued_creates.values()
+            if other is not message and other.tx_hash == message.tx_hash and other.message_id
+        }
+        for index, event in enumerate(create_events):
+            if (
+                event.get("message_id") not in claimed
+                and event.get("market_id") == market.market_id
+                and event.get("order_type") == self._side(order.trade_type)
+                and chain_amount_to_display(event.get("amount"), market.base) == order.amount
+                and chain_price_to_display(event.get("price"), market) == order.price
+            ):
+                message.msg_index = index
+                return event
+        return None
+
+    def _on_new_block(self):
+        if self.is_trading_required and not self._block_processing_lock.locked():
+            safe_ensure_future(self._update_order_status())
+
+    async def _update_order_status(self):
+        # Order states and fills come from the chain's order events, read block by block (see above).
+        try:
+            await self._process_blocks()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.logger().warning(f"Failed to read Beezee order events. Retrying on the next update. Error: {error}")
+
+    async def _process_blocks(self):
+        async with self._block_processing_lock:
+            for is_cancel in (False, True):
+                for message in list(self._queued_messages(is_cancel).values()):
+                    if message.tx_height is None:
+                        self._start_tx_lookup(message, is_cancel)
+            data_source = self._build_data_source()
+            latest_height = await data_source.get_latest_block_height()
+            nothing_to_follow = not (
+                self.in_flight_orders or self._queued_creates or self._queued_cancels or self._orders_to_verify
+            )
+            if self._last_processed_height is None or nothing_to_follow:
+                self._last_processed_height = latest_height
+            elif latest_height - self._last_processed_height > CONSTANTS.MAX_BLOCK_CATCH_UP:
+                self.logger().warning(
+                    f"Beezee fills were not read for {latest_height - self._last_processed_height} blocks "
+                    f"(more than {CONSTANTS.MAX_BLOCK_CATCH_UP}). Reconciling resting orders from the chain instead."
+                )
+                await self._reconcile_resting_orders(latest_height)
+                self._last_processed_height = latest_height
+            # Never read further back than the catch-up limit: older messages are settled from the order book.
+            floor_height = latest_height - CONSTANTS.MAX_BLOCK_CATCH_UP
+            behind = f"its blocks are more than {CONSTANTS.MAX_BLOCK_CATCH_UP} behind the chain"
+            for message in list(self._queued_creates.values()):
+                if message.tx_height is not None and message.next_height <= floor_height:
+                    await self._settle_create_from_book(message, behind)
+            for message in list(self._queued_cancels.values()):
+                if message.tx_height is not None and message.next_height <= floor_height:
+                    await self._finish_cancel_without_outcome(message, behind)
+            start_height = self._last_processed_height + 1
+            for message in list(self._queued_creates.values()) + list(self._queued_cancels.values()):
+                if message.tx_height is not None:
+                    start_height = min(start_height, message.next_height)
+            for height in range(start_height, latest_height + 1):
+                events = await self._read_block_events(height)
+                if events is None:
+                    await self._skip_unreadable_block(height, latest_height)
+                    events = []
+                await self._apply_block_events(height, events)
+                self._last_processed_height = max(self._last_processed_height, height)
+            await self._expire_queued_messages()
+            await self._verify_restored_orders()
+
+    async def _read_block_events(self, height: int) -> Optional[List[TradebinEvent]]:
+        """The block's tradebin events, or None once the block failed to load MAX_BLOCK_READ_ATTEMPTS times."""
+        try:
+            events = await self._block_events(height)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            failures = self._block_read_failures.get(height, 0) + 1
+            if failures < CONSTANTS.MAX_BLOCK_READ_ATTEMPTS:
+                self._block_read_failures[height] = failures
+                raise
+            self._block_read_failures.pop(height, None)
+            self.logger().warning(
+                f"Beezee block {height} could not be read {failures} times ({error}). Skipping it and settling the "
+                f"orders it could affect from the chain state."
+            )
+            return None
+        self._block_read_failures.pop(height, None)
+        return events
+
+    async def _skip_unreadable_block(self, height: int, latest_height: int):
+        reason = f"block {height} could not be read"
+        for message in [message for message in self._queued_creates.values() if message.in_window(height)]:
+            await self._settle_create_from_book(message, reason)
+        for message in [message for message in self._queued_cancels.values() if message.in_window(height)]:
+            await self._finish_cancel_without_outcome(message, reason)
+        # The chain state right after the skipped block has the resting orders' exact fills through it; the next
+        # blocks are then read as usual. A node that pruned that state too is read at the latest height instead.
+        await self._reconcile_resting_orders(height, fallback_height=latest_height)
+
+    async def _block_events(self, height: int) -> List[TradebinEvent]:
+        events = self._block_events_cache.get(height)
+        if events is None:
+            events = block_tradebin_events(await self._build_data_source().get_block_results(height))
+            self._block_events_cache[height] = events
+            oldest_kept = height - CONSTANTS.BLOCK_EVENTS_CACHE_SIZE
+            for cached_height in [cached for cached in self._block_events_cache if cached <= oldest_kept]:
+                del self._block_events_cache[cached_height]
+        return events
+
+    async def _apply_block_events(self, height: int, events: List[TradebinEvent]):
+        creates = [message for message in self._queued_creates.values() if message.in_window(height)]
+        cancels = [message for message in self._queued_cancels.values() if message.in_window(height)]
+        if events and self._account_address is not None:
+            data_source = self._build_data_source()
+            markets = await data_source.get_all_markets()
+            market_ids = (await data_source.get_symbol_map()).inverse
+            resting = {
+                order.exchange_order_id: order
+                for order in self._order_tracker.all_fillable_orders.values()
+                if len(order.exchange_order_id or "") == CONSTANTS.ORDER_ID_LENGTH
+            }
+            # client order id of a create → the id of its saved order, or None when nothing rested.
+            outcomes: Dict[str, Optional[str]] = {}
+            canceled: Set[str] = set()
+            maker_filled: Set[str] = set()
+            superseded: List[QueuedOrderMessage] = []
+            for index, event in enumerate(events):
+                if event.type in (CONSTANTS.ORDER_CREATE_MESSAGE_EVENT, CONSTANTS.ORDER_CANCEL_MESSAGE_EVENT):
+                    # A message id is reissued only once the queue is empty, so a later tx queuing the same id
+                    # proves our message was already processed. v8.2.0 emits nothing for a refunded create or a
+                    # cancel of an order that is gone, so that message has no outcome left to wait for.
+                    for message in creates + cancels:
+                        if message.message_id == event.get("message_id") and height > message.tx_height:
+                            superseded.append(message)
+                    creates = [message for message in creates if message not in superseded]
+                    cancels = [message for message in cancels if message not in superseded]
+                elif event.type == CONSTANTS.ORDER_EXECUTED_EVENT:
+                    market = markets.get(event.get("market_id"))
+                    if market is None:
                         continue
-                    fill_amount = min(remaining_trade_amount, remaining_order_amount)
-                    price = chain_price_to_display(trade["price"], market)
-                    updates.append(
-                        TradeUpdate(
-                            trade_id=synthetic_trade_id,
-                            client_order_id=order.client_order_id,
-                            exchange_order_id=order.exchange_order_id or self._creation_tx_hashes.get(order.client_order_id, order.client_order_id),
-                            trading_pair=order.trading_pair,
-                            fill_timestamp=float(trade["executed_at"]),
-                            fill_price=price,
-                            fill_base_amount=fill_amount,
-                            fill_quote_amount=fill_amount * price,
-                            fee=self.get_fee(market.base.symbol, market.quote.symbol, order.order_type, order.trade_type, fill_amount, price, is_maker=trade.get("maker") == self._account_address),
-                            is_taker=trade.get("taker") == self._account_address,
-                        )
+                    # The event's order_type is the side of the resting (maker) order.
+                    resting_order = resting.get(event.get("id"))
+                    if event.get("maker") == self._account_address and resting_order is not None:
+                        self._process_fill(resting_order, market, event, height, f"{height}-{index}-maker", is_taker=False)
+                        maker_filled.add(resting_order.client_order_id)
+                    if event.get("taker") == self._account_address:
+                        message = self._match_create(creates, market_ids, event, self._opposite_side(event.get("order_type")))
+                        if message is not None:
+                            order = self._order_tracker.fetch_order(message.client_order_id)
+                            self._process_fill(order, market, event, height, f"{height}-{index}-taker", is_taker=True)
+                            outcomes.setdefault(message.client_order_id, None)
+                elif event.type == CONSTANTS.ORDER_SAVED_EVENT and event.get("owner") == self._account_address:
+                    message = self._match_create(creates, market_ids, event, event.get("order_type"))
+                    if message is not None:
+                        order = self._order_tracker.fetch_order(message.client_order_id)
+                        order.update_exchange_order_id(event.get("id"))
+                        resting[event.get("id")] = order
+                        outcomes[message.client_order_id] = event.get("id")
+                elif event.type == CONSTANTS.ORDER_CANCELED_EVENT and event.get("owner") == self._account_address:
+                    message = next(
+                        (
+                            message for message in cancels
+                            if message.message_id == event.get("message_id") and message.order_id == event.get("id")
+                        ),
+                        None,
                     )
-                    self._processed_trade_ids_by_order[order.client_order_id].add(synthetic_trade_id)
-                    remaining_trade_amount -= fill_amount
-                    if fill_amount >= remaining_order_amount:
-                        order_index += 1
-        return updates
+                    if message is not None:
+                        canceled.add(message.client_order_id)
+            for client_order_id in set(outcomes) | canceled | maker_filled:
+                self._settle_order(client_order_id, height, outcomes, canceled)
+            for message in superseded:
+                if message.client_order_id in outcomes or message.client_order_id in canceled:
+                    continue
+                if self._queued_creates.get(message.client_order_id) is message:
+                    await self._finish_create_without_outcome(message, f"its message id was reused at height {height}")
+                elif self._queued_cancels.get(message.client_order_id) is message:
+                    await self._finish_cancel_without_outcome(message, f"its message id was reused at height {height}")
+        for message in creates + cancels:
+            if message.next_height == height:
+                message.next_height = height + 1
+
+    def _match_create(
+        self,
+        creates: List[QueuedOrderMessage],
+        market_ids: Dict[str, str],
+        event: TradebinEvent,
+        side: str,
+    ) -> Optional[QueuedOrderMessage]:
+        candidates = []
+        for message in creates:
+            order = self._order_tracker.fetch_order(message.client_order_id)
+            if (
+                order is not None
+                and message.message_id == event.get("message_id")
+                and market_ids.get(order.trading_pair) == event.get("market_id")
+                and self._side(order.trade_type) == side
+            ):
+                candidates.append(message)
+        # A message id is reused only after its previous holder was processed, so the latest tx owns it.
+        return max(candidates, key=lambda message: message.tx_height, default=None)
+
+    def _settle_order(
+        self,
+        client_order_id: str,
+        height: int,
+        outcomes: Dict[str, Optional[str]],
+        canceled: Set[str],
+    ):
+        order = self._order_tracker.fetch_order(client_order_id)
+        create = self._queued_creates.pop(client_order_id, None) if client_order_id in outcomes else None
+        if client_order_id in canceled:
+            self._queued_cancels.pop(client_order_id, None)
+        if order is None:
+            return
+        if order.executed_amount_base >= order.amount:
+            self._queued_cancels.pop(client_order_id, None)
+            state = OrderState.FILLED
+        elif client_order_id in canceled:
+            state = OrderState.CANCELED
+        elif create is not None and outcomes[client_order_id] is None:
+            self.logger().info(
+                f"Beezee order {client_order_id} filled {order.executed_amount_base} of {order.amount} at height "
+                f"{height} and the chain refunded the rest. tx_hash={create.tx_hash}, message_id={create.message_id}"
+            )
+            state = OrderState.CANCELED
+        elif client_order_id in self._queued_cancels:
+            return
+        else:
+            state = self._open_state(order)
+        if create is not None:
+            self.logger().info(
+                f"Beezee order {client_order_id} processed at height {height}. exchange_order_id="
+                f"{order.exchange_order_id}, tx_hash={create.tx_hash}, message_id={create.message_id}, state={state.name}"
+            )
+        self._update_order_state(order, state)
+
+    def _process_fill(
+        self, order: InFlightOrder, market: BeezeeMarket, event: TradebinEvent, height: int, trade_id: str, is_taker: bool
+    ):
+        if height <= self._fills_counted_through.get(order.client_order_id, -1):
+            return
+        amount = chain_amount_to_display(event.get("amount"), market.base)
+        price = chain_price_to_display(event.get("price"), market)
+        self._order_tracker.process_trade_update(
+            TradeUpdate(
+                trade_id=trade_id,
+                client_order_id=order.client_order_id,
+                exchange_order_id=order.exchange_order_id,
+                trading_pair=order.trading_pair,
+                fill_timestamp=self.current_timestamp,
+                fill_price=price,
+                fill_base_amount=amount,
+                fill_quote_amount=amount * price,
+                fee=self._fill_fee(order, market, amount, price, is_taker),
+                is_taker=is_taker,
+            )
+        )
+
+    def _fill_fee(self, order: InFlightOrder, market: BeezeeMarket, amount: Decimal, price: Decimal, is_taker: bool):
+        """The tradebin fee is a flat amount charged once per create message, at tx time, so it goes on the order's
+        first fill only. The chain charges the taker fee when an opposite order rests at that exact price, else the
+        maker fee; a first fill taken while the create is processed counts as taker, any other as maker."""
+        if order.order_fills:
+            return AddedToCostTradeFee(flat_fees=[])
+        return self.get_fee(
+            market.base.symbol, market.quote.symbol, order.order_type, order.trade_type, amount, price,
+            is_maker=not is_taker,
+        )
+
+    async def _expire_queued_messages(self):
+        window = f"no outcome within {CONSTANTS.ORDER_OUTCOME_BLOCK_WINDOW} blocks of its tx"
+        for message in list(self._queued_creates.values()):
+            if message.tx_height is not None and message.next_height > message.last_height:
+                await self._finish_create_without_outcome(message, window)
+        for message in list(self._queued_cancels.values()):
+            if message.tx_height is not None and message.next_height > message.last_height:
+                await self._finish_cancel_without_outcome(message, window)
+
+    async def _finish_create_without_outcome(self, message: QueuedOrderMessage, reason: str):
+        self._queued_creates.pop(message.client_order_id, None)
+        self.logger().warning(
+            f"Beezee order {message.client_order_id} failed: {reason}. tx_hash={message.tx_hash}, "
+            f"message_id={message.message_id}, tx_height={message.tx_height}"
+        )
+        order = self._order_tracker.fetch_tracked_order(message.client_order_id)
+        if order is not None:
+            self._update_order_state(order, OrderState.FAILED)
+
+    async def _settle_create_from_book(self, message: QueuedOrderMessage, reason: str):
+        """Settles a create whose outcome cannot be read from blocks: it rests if the book holds an order of ours with
+        its market, side, amount and price that no tracked order claims, else it fails."""
+        self._queued_creates.pop(message.client_order_id, None)
+        order = self._order_tracker.fetch_tracked_order(message.client_order_id)
+        if order is None:
+            return
+        order_id = await self._unclaimed_order_on_book(order)
+        if order_id is None:
+            await self._finish_create_without_outcome(message, reason)
+            return
+        self.logger().warning(
+            f"Beezee order {message.client_order_id}: {reason}, but a matching order of this account rests on the "
+            f"book. Taking it as this order. exchange_order_id={order_id}, tx_hash={message.tx_hash}"
+        )
+        order.update_exchange_order_id(order_id)
+        self._update_order_state(order, self._open_state(order))
+
+    async def _unclaimed_order_on_book(self, order: InFlightOrder) -> Optional[str]:
+        data_source = self._build_data_source()
+        market = await data_source.get_market_by_trading_pair(order.trading_pair)
+        side = self._side(order.trade_type)
+        claimed = {tracked.exchange_order_id for tracked in self._order_tracker.all_fillable_orders.values()}
+        for open_order in await data_source.get_user_market_orders(market.market_id):
+            order_id = open_order.get("id")
+            if order_id in claimed or open_order.get("order_type", side) != side:
+                continue
+            chain_order = await data_source.get_market_order(market.market_id, side, order_id)
+            if (
+                chain_order is not None
+                and chain_amount_to_display(chain_order["amount"], market.base) == order.amount
+                and chain_price_to_display(chain_order["price"], market) == order.price
+            ):
+                return order_id
+        return None
+
+    async def _finish_cancel_without_outcome(self, message: QueuedOrderMessage, reason: str):
+        self._queued_cancels.pop(message.client_order_id, None)
+        order = self._order_tracker.fetch_tracked_order(message.client_order_id)
+        if order is None or order.is_done:
+            return
+        if await self._is_on_book(order):
+            self.logger().warning(
+                f"Beezee cancel of order {message.client_order_id} did not take effect ({reason}) and the order is "
+                f"still on the book. tx_hash={message.tx_hash}, message_id={message.message_id}"
+            )
+            self._update_order_state(order, self._open_state(order))
+        else:
+            # Filled before the cancel executed: the fills came from the block events.
+            self._update_order_state(order, self._off_book_state(order))
+
+    async def _verify_restored_orders(self):
+        for client_order_id in list(self._orders_to_verify):
+            self._orders_to_verify.discard(client_order_id)
+            order = self._order_tracker.fetch_tracked_order(client_order_id)
+            if order is None:
+                continue
+            self._order_tracker.process_order_update(await self._request_order_status(order))
+
+    async def _reconcile_resting_orders(self, height: int, fallback_height: Optional[int] = None):
+        """Takes the resting orders' fills up to `height` from the chain state, for when their block events are lost.
+
+        An order still on the book gets the amount it lost as one fill at the order price; its block fills up to
+        `height` are then ignored. An order gone from the book has an unknown history (filled, or cancelled from
+        elsewhere), so no fill is invented: it is checked against the book and ends CANCELED unless its fills cover it.
+        """
+        data_source = self._build_data_source()
+        for order in list(self.in_flight_orders.values()):
+            if len(order.exchange_order_id or "") != CONSTANTS.ORDER_ID_LENGTH:
+                continue
+            market = await data_source.get_market_by_trading_pair(order.trading_pair)
+            side = self._side(order.trade_type)
+            read_height = height
+            try:
+                chain_order = await data_source.get_market_order(
+                    market.market_id, side, order.exchange_order_id, height=height
+                )
+            except Exception:
+                if fallback_height is None:
+                    raise
+                read_height = fallback_height
+                chain_order = await data_source.get_market_order(
+                    market.market_id, side, order.exchange_order_id, height=fallback_height
+                )
+            self._orders_to_verify.add(order.client_order_id)
+            if chain_order is None:
+                # No fill comes from the chain state, so block fills still read after this point keep counting.
+                if order.executed_amount_base < order.amount:
+                    self.logger().warning(
+                        f"Beezee order {order.client_order_id} left the book while its fills were not read. "
+                        f"Its fills are unknown, so it is closed as cancelled without a fill."
+                    )
+                continue
+            self._fills_counted_through[order.client_order_id] = read_height
+            missed_fill = order.amount - chain_amount_to_display(chain_order["amount"], market.base) - order.executed_amount_base
+            if missed_fill <= Decimal("0"):
+                continue
+            self.logger().warning(
+                f"Beezee order {order.client_order_id} lost {missed_fill} while fills were not read. "
+                f"Recording it as one fill at the order price."
+            )
+            self._order_tracker.process_trade_update(
+                TradeUpdate(
+                    trade_id=f"reconcile-{read_height}",
+                    client_order_id=order.client_order_id,
+                    exchange_order_id=order.exchange_order_id,
+                    trading_pair=order.trading_pair,
+                    fill_timestamp=self.current_timestamp,
+                    fill_price=order.price,
+                    fill_base_amount=missed_fill,
+                    fill_quote_amount=missed_fill * order.price,
+                    fee=self._fill_fee(order, market, missed_fill, order.price, is_taker=False),
+                    is_taker=False,
+                )
+            )
+
+    async def _is_on_book(self, order: InFlightOrder) -> bool:
+        data_source = self._build_data_source()
+        market = await data_source.get_market_by_trading_pair(order.trading_pair)
+        open_orders = await data_source.get_user_market_orders(market.market_id)
+        return any(open_order.get("id") == order.exchange_order_id for open_order in open_orders)
+
+    def _update_order_state(self, order: InFlightOrder, state: OrderState):
+        self._order_tracker.process_order_update(
+            OrderUpdate(
+                trading_pair=order.trading_pair,
+                update_timestamp=self.current_timestamp,
+                new_state=state,
+                client_order_id=order.client_order_id,
+                exchange_order_id=order.exchange_order_id,
+            )
+        )
+
+    @staticmethod
+    def _open_state(order: InFlightOrder) -> OrderState:
+        return OrderState.PARTIALLY_FILLED if order.executed_amount_base > Decimal("0") else OrderState.OPEN
+
+    @staticmethod
+    def _off_book_state(order: InFlightOrder) -> OrderState:
+        return OrderState.FILLED if order.executed_amount_base >= order.amount else OrderState.CANCELED
+
+    @staticmethod
+    def _side(trade_type: TradeType) -> str:
+        return CONSTANTS.SIDE_BUY if trade_type is TradeType.BUY else CONSTANTS.SIDE_SELL
+
+    @staticmethod
+    def _opposite_side(side: str) -> str:
+        return CONSTANTS.SIDE_SELL if side == CONSTANTS.SIDE_BUY else CONSTANTS.SIDE_BUY
 
     async def _all_trade_updates_for_order(self, order: InFlightOrder) -> List[TradeUpdate]:
-        market = await self._build_data_source().get_market_by_trading_pair(order.trading_pair)
-        history = await self._build_data_source().get_market_history(market.market_id, limit=CONSTANTS.DEFAULT_HISTORY_LIMIT)
-        return self._allocate_trade_updates([order], market, history)
+        # Fills come from the block events (see _apply_block_events), never from the id-less market history.
+        return []
 
     async def _request_order_status(self, tracked_order: InFlightOrder) -> OrderUpdate:
-        data_source = self._build_data_source()
-        market = await data_source.get_market_by_trading_pair(tracked_order.trading_pair)
-        side = CONSTANTS.SIDE_BUY if tracked_order.trade_type is TradeType.BUY else CONSTANTS.SIDE_SELL
-        open_refs = await data_source.get_user_market_orders(market.market_id)
-
-        if tracked_order.exchange_order_id and len(tracked_order.exchange_order_id) == CONSTANTS.ORDER_ID_LENGTH:
-            if any(ref["id"] == tracked_order.exchange_order_id for ref in open_refs):
-                if tracked_order.is_pending_cancel_confirmation:
-                    state = OrderState.PENDING_CANCEL
-                else:
-                    state = OrderState.PARTIALLY_FILLED if tracked_order.executed_amount_base > Decimal("0") else OrderState.OPEN
-                return OrderUpdate(
-                    trading_pair=tracked_order.trading_pair,
-                    update_timestamp=self.current_timestamp,
-                    new_state=state,
-                    client_order_id=tracked_order.client_order_id,
-                    exchange_order_id=tracked_order.exchange_order_id,
+        state = tracked_order.current_state
+        if len(tracked_order.exchange_order_id or "") == CONSTANTS.ORDER_ID_LENGTH:
+            if await self._is_on_book(tracked_order):
+                state = (
+                    OrderState.PENDING_CANCEL
+                    if tracked_order.client_order_id in self._queued_cancels
+                    else self._open_state(tracked_order)
                 )
-
-        create_spec = self._create_order_specs.get(tracked_order.client_order_id)
-        recovered_after_restart = False
-        if create_spec is None and len(tracked_order.exchange_order_id or "") == CONSTANTS.TX_HASH_LENGTH:
-            creation_tx = await data_source.get_tx(tracked_order.exchange_order_id)
-            tx_response = (creation_tx or {}).get("tx_response")
-            creation_tx_code = (
-                int(tx_response["code"])
-                if isinstance(tx_response, dict) and "code" in tx_response
-                else None
-            )
-            if creation_tx_code == 0:
-                create_spec = (
-                    market.market_id,
-                    side,
-                    display_amount_to_chain(tracked_order.amount, market.base),
-                    display_price_to_chain(tracked_order.price, market),
-                )
-                recovered_after_restart = True
-        if create_spec is not None:
-            expected_market_id, expected_side, expected_amount, expected_price = create_spec
-            pre_create_ids = self._pre_create_order_ids.get(tracked_order.client_order_id, set())
-            claimed_exchange_ids = {order.exchange_order_id for order in self.in_flight_orders.values() if order.exchange_order_id}
-            matching_candidate_ids: List[str] = []
-            candidate_ids = data_source.candidate_order_ids(open_refs, expected_market_id, expected_side)
-            for candidate_id in candidate_ids:
-                if candidate_id in pre_create_ids or candidate_id in claimed_exchange_ids:
-                    continue
-                candidate_order = await data_source.get_market_order(expected_market_id, expected_side, candidate_id)
-                if candidate_order is None:
-                    continue
-                try:
-                    matches = (
-                        Decimal(str(candidate_order.get("amount"))) == Decimal(expected_amount)
-                        and Decimal(str(candidate_order.get("price"))) == Decimal(expected_price)
-                    )
-                    if recovered_after_restart:
-                        created_at = Decimal(str(candidate_order["created_at"]))
-                        order_created_at = Decimal(str(tracked_order.creation_timestamp))
-                        matches = (
-                            matches
-                            and abs(created_at - order_created_at) <= CONSTANTS.ORDER_ID_RECOVERY_TIME_TOLERANCE
-                        )
-                except Exception:
-                    matches = False
-                if matches:
-                    matching_candidate_ids.append(candidate_id)
-            if len(matching_candidate_ids) == 1:
-                candidate_id = matching_candidate_ids[0]
-                self._pre_create_order_ids.pop(tracked_order.client_order_id, None)
-                self._create_order_specs.pop(tracked_order.client_order_id, None)
-                if recovered_after_restart:
-                    self.logger().info(
-                        f"Recovered Beezee exchange order id after restart. client_order_id={tracked_order.client_order_id}, "
-                        f"exchange_order_id={candidate_id}"
-                    )
-                state = OrderState.PARTIALLY_FILLED if tracked_order.executed_amount_base > Decimal("0") else OrderState.OPEN
-                return OrderUpdate(
-                    trading_pair=tracked_order.trading_pair,
-                    update_timestamp=self.current_timestamp,
-                    new_state=state,
-                    client_order_id=tracked_order.client_order_id,
-                    exchange_order_id=candidate_id,
-                )
-            self._log_unresolved_order_id(
-                client_order_id=tracked_order.client_order_id,
-                expected_market_id=expected_market_id,
-                expected_side=expected_side,
-                expected_amount=expected_amount,
-                expected_price=expected_price,
-                candidate_ids=candidate_ids,
-                matching_candidate_ids=matching_candidate_ids,
-            )
-
-        cancel_tx_hash = self._cancel_tx_hashes.get(tracked_order.client_order_id)
-        creation_tx_hash = self._creation_tx_hashes.get(tracked_order.client_order_id)
-        if creation_tx_hash is None and len(tracked_order.exchange_order_id or "") == CONSTANTS.TX_HASH_LENGTH:
-            creation_tx_hash = tracked_order.exchange_order_id
-        tx_hash = cancel_tx_hash or creation_tx_hash
-        tx = await data_source.get_tx(tx_hash) if tx_hash else None
-        tx_code = int((tx.get("tx_response") or {}).get("code", 0)) if tx is not None else None
-        if tx is not None and tx_hash == creation_tx_hash and tx_code not in (None, 0):
-            tx_response = tx.get("tx_response") or {}
-            if is_denom_halted_error(tx_code, tx_response.get("codespace"), tx_response.get("raw_log")):
-                await self._mark_market_halted_by_chain(market)
-        if creation_tx_hash is not None and tx_code not in (None, 0):
-            new_state = OrderState.FAILED
-        elif cancel_tx_hash is not None and tx_code not in (None, 0):
-            new_state = OrderState.PARTIALLY_FILLED if tracked_order.executed_amount_base > Decimal("0") else OrderState.OPEN
-        elif tracked_order.executed_amount_base >= tracked_order.amount:
-            new_state = OrderState.FILLED
-        elif tracked_order.is_pending_cancel_confirmation:
-            new_state = OrderState.CANCELED if cancel_tx_hash is not None and tx_code == 0 else OrderState.PENDING_CANCEL
-        elif creation_tx_hash is not None and tx_code == 0:
-            # A create tx can be confirmed after the order has immediately filled.
-            # Preserve the existing lifecycle state until fill polling determines the terminal state.
-            new_state = OrderState.OPEN if tracked_order.current_state == OrderState.PENDING_CREATE else tracked_order.current_state
-        elif tracked_order.executed_amount_base > Decimal("0"):
-            new_state = OrderState.PARTIALLY_FILLED
-        else:
-            new_state = OrderState.PENDING_CREATE if tx_hash else OrderState.FAILED
+            else:
+                state = self._off_book_state(tracked_order)
         return OrderUpdate(
             trading_pair=tracked_order.trading_pair,
             update_timestamp=self.current_timestamp,
-            new_state=new_state,
+            new_state=state,
             client_order_id=tracked_order.client_order_id,
-            exchange_order_id=tracked_order.exchange_order_id or tx_hash,
+            exchange_order_id=tracked_order.exchange_order_id,
         )
-
-    def _log_unresolved_order_id(
-        self,
-        client_order_id: str,
-        expected_market_id: str,
-        expected_side: str,
-        expected_amount: str,
-        expected_price: str,
-        candidate_ids: List[str],
-        matching_candidate_ids: List[str],
-    ):
-        now = time.time()
-        last_log_timestamp = self._last_unresolved_order_log_timestamp.get(client_order_id, 0.0)
-        if now - last_log_timestamp >= 30.0:
-            self.logger().warning(
-                f"Beezee exchange order id is unresolved. client_order_id={client_order_id}, "
-                f"market={expected_market_id}, side={expected_side}, amount={expected_amount}, "
-                f"price={expected_price}, candidates={candidate_ids}, matches={matching_candidate_ids}"
-            )
-            self._last_unresolved_order_log_timestamp[client_order_id] = now
 
     async def _initialize_trading_pair_symbol_map(self):
         try:

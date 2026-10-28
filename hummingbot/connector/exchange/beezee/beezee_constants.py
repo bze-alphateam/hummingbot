@@ -37,13 +37,34 @@ GET_TX_PATH_URL = "/cosmos/tx/v1beta1/txs"
 BROADCAST_TX_PATH_URL = "/cosmos/tx/v1beta1/txs"
 SIMULATE_TX_PATH_URL = "/cosmos/tx/v1beta1/simulate"
 HALTED_DENOMS_PATH_URL = "/bze/tradebin/halted_denoms"
+# CometBFT RPC
+RPC_STATUS_PATH_URL = "/status"
+BLOCK_RESULTS_PATH_URL = "/block_results"
 
 SIDE_BUY = "buy"
 SIDE_SELL = "sell"
 
 ORDER_ID_LENGTH = 24
 TX_HASH_LENGTH = 64
-ORDER_ID_RECOVERY_TIME_TOLERANCE = 120
+
+# Order tracking from the chain v8.2.0 queue `message_id` events.
+TRADEBIN_EVENT_PREFIX = "bze.tradebin."
+ORDER_CREATE_MESSAGE_EVENT = "bze.tradebin.OrderCreateMessageEvent"
+ORDER_CANCEL_MESSAGE_EVENT = "bze.tradebin.OrderCancelMessageEvent"
+ORDER_EXECUTED_EVENT = "bze.tradebin.OrderExecutedEvent"
+ORDER_SAVED_EVENT = "bze.tradebin.OrderSavedEvent"
+ORDER_CANCELED_EVENT = "bze.tradebin.OrderCanceledEvent"
+# A queued message's outcome is looked for in its tx block and the 19 blocks after it.
+ORDER_OUTCOME_BLOCK_WINDOW = 20
+# Tx lookup after a broadcast: wait 1 s, 2 s, 3 s, then every 3 s, at most 60 s in total.
+TX_LOOKUP_DELAYS = (1.0, 2.0, 3.0) + (3.0,) * 18
+# Fills missed while the bot was down are read back from at most this many blocks.
+MAX_BLOCK_CATCH_UP = 1000
+# A block whose results cannot be read this many times in a row is skipped (pruned or refused by the node).
+MAX_BLOCK_READ_ATTEMPTS = 3
+BLOCK_EVENTS_CACHE_SIZE = 64
+# Reserved tracking-states key holding the block cursor and the in-flight tx messages.
+TRACKING_STATE_KEY = "__beezee_block_tracking__"
 
 DEFAULT_HISTORY_LIMIT = 200
 DEFAULT_MARKET_PAGE_SIZE = 200
@@ -68,6 +89,7 @@ GENERAL_LIMIT_ID = "beezee_general"
 QUERY_LIMIT_ID = "beezee_query"
 TX_LIMIT_ID = "beezee_tx"
 BLOCK_STREAM_LIMIT_ID = "beezee_block_stream"
+RPC_LIMIT_ID = "beezee_rpc"
 
 ORDER_STATE = {
     "PENDING_CREATE": OrderState.PENDING_CREATE,
@@ -84,6 +106,7 @@ RATE_LIMITS = [
     RateLimit(limit_id=QUERY_LIMIT_ID, limit=120, time_interval=MINUTE),
     RateLimit(limit_id=TX_LIMIT_ID, limit=30, time_interval=MINUTE),
     RateLimit(limit_id=BLOCK_STREAM_LIMIT_ID, limit=5, time_interval=MINUTE),
+    RateLimit(limit_id=RPC_LIMIT_ID, limit=300, time_interval=MINUTE),
     RateLimit(limit_id=PING_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(GENERAL_LIMIT_ID, 1)]),
     RateLimit(limit_id=TRADING_PAIRS_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
     RateLimit(limit_id=TRADEBIN_PARAMS_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),

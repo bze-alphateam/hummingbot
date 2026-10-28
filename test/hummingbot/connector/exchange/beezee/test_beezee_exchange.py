@@ -65,6 +65,16 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.exchange.logger().setLevel(1)
         self.exchange.logger().addHandler(self)
 
+    async def asyncTearDown(self) -> None:
+        # Nothing the connector started may outlive the test.
+        await self.exchange.stop_network()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        leftover = [task for task in asyncio.all_tasks() if task is not asyncio.current_task() and not task.done()]
+        for task in leftover:
+            task.cancel()
+        self.assertEqual([], [task.get_coro() for task in leftover])
+
     def tearDown(self) -> None:
         self.exchange.logger().removeHandler(self)
 
@@ -178,184 +188,6 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(OrderState.OPEN, update.new_state)
         self.assertEqual(order.exchange_order_id, update.exchange_order_id)
 
-    async def test_request_order_status_claims_new_exchange_order_id_from_open_orders(self):
-        order = InFlightOrder(
-            client_order_id="OID2",
-            trading_pair="BZE-USDC",
-            order_type=OrderType.LIMIT,
-            trade_type=TradeType.BUY,
-            amount=Decimal("1"),
-            creation_timestamp=1.0,
-            price=Decimal("2.5"),
-        )
-        self.exchange._pre_create_order_ids[order.client_order_id] = set()
-        self.exchange._create_order_specs[order.client_order_id] = (self.market.market_id, "buy", "1000000", "2.5")
-        data_source = Mock()
-        data_source.get_market_by_trading_pair = AsyncMock(return_value=self.market)
-        data_source.get_user_market_orders = AsyncMock(
-            return_value=[{"id": "000000000000000000000009", "market_id": self.market.market_id, "order_type": "buy"}]
-        )
-        data_source.candidate_order_ids = Mock(return_value=["000000000000000000000009"])
-        data_source.get_market_order = AsyncMock(return_value={"price": "2.5", "amount": "1000000.0"})
-        self.exchange._data_source = data_source
-
-        update = await self.exchange._request_order_status(order)
-
-        self.assertEqual(OrderState.OPEN, update.new_state)
-        self.assertEqual("000000000000000000000009", update.exchange_order_id)
-
-    async def test_request_order_status_marks_failed_when_create_tx_fails(self):
-        order = InFlightOrder(
-            client_order_id="OID3",
-            trading_pair="BZE-USDC",
-            order_type=OrderType.LIMIT,
-            trade_type=TradeType.BUY,
-            amount=Decimal("1"),
-            creation_timestamp=1.0,
-            price=Decimal("2.5"),
-        )
-        self.exchange._creation_tx_hashes[order.client_order_id] = "A" * 64
-        data_source = Mock()
-        data_source.get_market_by_trading_pair = AsyncMock(return_value=self.market)
-        data_source.get_user_market_orders = AsyncMock(return_value=[])
-        data_source.candidate_order_ids = Mock(return_value=[])
-        data_source.get_tx = AsyncMock(return_value={"tx_response": {"code": 11}})
-        self.exchange._data_source = data_source
-
-        update = await self.exchange._request_order_status(order)
-
-        self.assertEqual(OrderState.FAILED, update.new_state)
-
-    async def test_request_order_status_preserves_open_state_after_confirmed_create_tx(self):
-        order = InFlightOrder(
-            client_order_id="OID3A",
-            trading_pair="BZE-USDC",
-            order_type=OrderType.LIMIT,
-            trade_type=TradeType.BUY,
-            amount=Decimal("1"),
-            creation_timestamp=1.0,
-            price=Decimal("2.5"),
-            exchange_order_id="A" * 64,
-            initial_state=OrderState.OPEN,
-        )
-        data_source = Mock()
-        data_source.get_market_by_trading_pair = AsyncMock(return_value=self.market)
-        data_source.get_user_market_orders = AsyncMock(return_value=[])
-        data_source.candidate_order_ids = Mock(return_value=[])
-        data_source.get_tx = AsyncMock(return_value={"tx_response": {"code": 0}})
-        self.exchange._data_source = data_source
-
-        update = await self.exchange._request_order_status(order)
-
-        self.assertEqual(OrderState.OPEN, update.new_state)
-
-    async def test_request_order_status_marks_canceled_after_cancel_tx(self):
-        order = InFlightOrder(
-            client_order_id="OID4",
-            trading_pair="BZE-USDC",
-            order_type=OrderType.LIMIT,
-            trade_type=TradeType.BUY,
-            amount=Decimal("1"),
-            creation_timestamp=1.0,
-            price=Decimal("2.5"),
-            exchange_order_id="000000000000000000000004",
-            initial_state=OrderState.PENDING_CANCEL,
-        )
-        self.exchange._cancel_tx_hashes[order.client_order_id] = "B" * 64
-        data_source = Mock()
-        data_source.get_market_by_trading_pair = AsyncMock(return_value=self.market)
-        data_source.get_user_market_orders = AsyncMock(return_value=[])
-        data_source.candidate_order_ids = Mock(return_value=[])
-        data_source.get_tx = AsyncMock(return_value={"tx_response": {"code": 0}})
-        self.exchange._data_source = data_source
-
-        update = await self.exchange._request_order_status(order)
-
-        self.assertEqual(OrderState.CANCELED, update.new_state)
-
-    async def test_request_order_status_keeps_cancel_pending_until_tx_is_confirmed(self):
-        order = InFlightOrder(
-            client_order_id="OID5",
-            trading_pair="BZE-USDC",
-            order_type=OrderType.LIMIT,
-            trade_type=TradeType.BUY,
-            amount=Decimal("1"),
-            creation_timestamp=1.0,
-            price=Decimal("2.5"),
-            exchange_order_id="000000000000000000000005",
-            initial_state=OrderState.PENDING_CANCEL,
-        )
-        self.exchange._cancel_tx_hashes[order.client_order_id] = "C" * 64
-        data_source = Mock()
-        data_source.get_market_by_trading_pair = AsyncMock(return_value=self.market)
-        data_source.get_user_market_orders = AsyncMock(return_value=[])
-        data_source.candidate_order_ids = Mock(return_value=[])
-        data_source.get_tx = AsyncMock(return_value=None)
-        self.exchange._data_source = data_source
-
-        update = await self.exchange._request_order_status(order)
-
-        self.assertEqual(OrderState.PENDING_CANCEL, update.new_state)
-
-    async def test_request_order_status_does_not_claim_ambiguous_order_candidates(self):
-        order = InFlightOrder(
-            client_order_id="OID6",
-            trading_pair="BZE-USDC",
-            order_type=OrderType.LIMIT,
-            trade_type=TradeType.BUY,
-            amount=Decimal("1"),
-            creation_timestamp=1.0,
-            price=Decimal("2.5"),
-        )
-        self.exchange._creation_tx_hashes[order.client_order_id] = "D" * 64
-        self.exchange._pre_create_order_ids[order.client_order_id] = set()
-        self.exchange._create_order_specs[order.client_order_id] = (self.market.market_id, "buy", "1000000", "2.5")
-        data_source = Mock()
-        data_source.get_market_by_trading_pair = AsyncMock(return_value=self.market)
-        data_source.get_user_market_orders = AsyncMock(
-            return_value=[
-                {"id": "000000000000000000000010", "market_id": self.market.market_id, "order_type": "buy"},
-                {"id": "000000000000000000000011", "market_id": self.market.market_id, "order_type": "buy"},
-            ]
-        )
-        data_source.candidate_order_ids = Mock(return_value=["000000000000000000000010", "000000000000000000000011"])
-        data_source.get_market_order = AsyncMock(return_value={"price": "2.5", "amount": "1000000"})
-        data_source.get_tx = AsyncMock(return_value=None)
-        self.exchange._data_source = data_source
-
-        update = await self.exchange._request_order_status(order)
-
-        self.assertEqual(OrderState.PENDING_CREATE, update.new_state)
-        self.assertEqual("D" * 64, update.exchange_order_id)
-
-    async def test_request_order_status_recovers_unique_order_id_after_restart(self):
-        order = InFlightOrder(
-            client_order_id="OID6A",
-            trading_pair="BZE-USDC",
-            order_type=OrderType.LIMIT,
-            trade_type=TradeType.BUY,
-            amount=Decimal("1"),
-            creation_timestamp=1.0,
-            price=Decimal("2.5"),
-            exchange_order_id="E" * 64,
-        )
-        data_source = Mock()
-        data_source.get_market_by_trading_pair = AsyncMock(return_value=self.market)
-        data_source.get_user_market_orders = AsyncMock(
-            return_value=[{"id": "000000000000000000000012", "market_id": self.market.market_id, "order_type": "buy"}]
-        )
-        data_source.candidate_order_ids = Mock(return_value=["000000000000000000000012"])
-        data_source.get_market_order = AsyncMock(
-            return_value={"price": "2.5", "amount": "1000000", "created_at": "1"}
-        )
-        data_source.get_tx = AsyncMock(return_value={"tx_response": {"code": 0}})
-        self.exchange._data_source = data_source
-
-        update = await self.exchange._request_order_status(order)
-
-        self.assertEqual(OrderState.OPEN, update.new_state)
-        self.assertEqual("000000000000000000000012", update.exchange_order_id)
-
     async def test_place_cancel_defers_when_exchange_order_id_is_unresolved(self):
         order = InFlightOrder(
             client_order_id="OID7",
@@ -371,7 +203,6 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         data_source.get_market_by_trading_pair = AsyncMock(return_value=self.market)
         data_source.broadcast_cancel_order = AsyncMock()
         self.exchange._data_source = data_source
-        self.exchange._request_order_status = AsyncMock(return_value=Mock(exchange_order_id=None))
 
         canceled = await self.exchange._place_cancel(order.client_order_id, order)
 
@@ -448,7 +279,6 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
     async def test_halt_cancel_is_retried_once_the_exchange_order_id_resolves(self):
         data_source = self._halt_data_source([{"ubze"}, {"ubze"}])
         data_source.broadcast_cancel_order = AsyncMock(return_value={"tx_response": {"code": 0, "txhash": "CA" * 32}})
-        self.exchange._request_order_status = AsyncMock(return_value=Mock(exchange_order_id=None))
         self._track_order("OID-QUEUED")
 
         await self._force_halted_denoms_refresh()
@@ -546,28 +376,34 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, self._logged(logging.WARNING, "Beezee market BZE-USDC is halted"))
 
     async def test_delivered_create_tx_with_code_4017_marks_pair_halted(self):
-        order = InFlightOrder(
-            client_order_id="OID-D",
-            trading_pair="BZE-USDC",
-            order_type=OrderType.LIMIT,
-            trade_type=TradeType.BUY,
-            amount=Decimal("1"),
-            creation_timestamp=1.0,
-            price=Decimal("2.5"),
-        )
-        self.exchange._creation_tx_hashes[order.client_order_id] = "F" * 64
         # The node does not list the halted denom yet: the delivered 4017 is the only halt signal.
         data_source = self._halt_data_source([set(), set()])
-        data_source.candidate_order_ids = Mock(return_value=[])
-        data_source.get_tx = AsyncMock(return_value={"tx_response": {"code": 4017, "codespace": "tradebin", "raw_log": "denom is halted"}})
+        data_source.get_tx = AsyncMock(return_value={"tx_response": {
+            "code": 4017, "codespace": "tradebin", "raw_log": "denom is halted", "height": "100",
+        }})
 
-        update = await self.exchange._request_order_status(order)
+        async def no_wait(_delay: float):
+            await asyncio.sleep(0)
 
-        self.assertEqual(OrderState.FAILED, update.new_state)
+        self.exchange._sleep = no_wait
+        self.exchange.start_tracking_order(
+            order_id="OID-D",
+            exchange_order_id=None,
+            trading_pair="BZE-USDC",
+            trade_type=TradeType.BUY,
+            price=Decimal("2.5"),
+            amount=Decimal("1"),
+            order_type=OrderType.LIMIT,
+        )
+
+        await self._place_buy("OID-D")
+        await self._drain_tasks()
+
+        self.assertEqual(OrderState.FAILED, self.exchange._order_tracker.fetch_order("OID-D").current_state)
         with self.assertRaises(ValueError) as context:
             await self._place_buy()
         self.assertEqual("Beezee market ubze/uusdc is halted (denom unknown, refused by the chain)", str(context.exception))
-        data_source.broadcast_create_order.assert_not_awaited()
+        data_source.broadcast_create_order.assert_awaited_once()
 
     async def test_unhalt_allows_trading_again(self):
         data_source = self._halt_data_source([{"ubze"}, set()])
