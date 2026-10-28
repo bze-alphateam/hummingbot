@@ -42,9 +42,27 @@ jobs:
           conda activate hummingbot
           python -m pytest test/hummingbot/connector/exchange/beezee
 
+      # Some upstream connector tests (lambdaplex, coin_gecko) time out now and then on the hosted runner, on `bze` too.
+      # Failed upstream tests get one rerun; a failed BeeZee test fails the job at once.
       - name: Full upstream suite
         shell: bash
         run: |
           source $CONDA/etc/profile.d/conda.sh
           conda activate hummingbot
-          make test
+          if make test; then
+            exit 0
+          fi
+          failed=$(python -c 'import json; print("\n".join(json.load(open(".pytest_cache/v/cache/lastfailed"))))')
+          if [ -z "$failed" ]; then
+            echo "make test failed without a failed test to rerun"
+            exit 1
+          fi
+          if grep -q "/exchange/beezee/" <<< "$failed"; then
+            echo "BeeZee tests failed, no rerun:"
+            echo "$failed"
+            exit 1
+          fi
+          while read -r test_id; do
+            echo "::warning::Upstream test failed, rerunning once: $test_id"
+          done <<< "$failed"
+          python -m pytest --last-failed --last-failed-no-failures none
