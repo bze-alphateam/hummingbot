@@ -65,4 +65,6 @@ jobs:
           while read -r test_id; do
             echo "::warning::Upstream test failed, rerunning once: $test_id"
           done <<< "$failed"
-          python -m pytest --last-failed --last-failed-no-failures none
+          # The failed ids, not --last-failed: that would collect the dirs make test ignores.
+          mapfile -t test_ids <<< "$failed"
+          python -m pytest "${test_ids[@]}"
