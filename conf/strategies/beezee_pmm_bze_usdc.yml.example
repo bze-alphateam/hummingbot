@@ -1,0 +1,56 @@
+########################################################
+###  Pure market making on BeeZee mainnet: BZE/USDC  ###
+########################################################
+# Copy to conf/strategies/beezee_pmm_bze_usdc.yml, set order_amount, then `import beezee_pmm_bze_usdc.yml`.
+# Network: beezee-1. In `connect beezee` pick network `mainnet` (REST https://rest.getbze.com,
+#   RPC https://rpc.getbze.com, gas price 0.01 ubze, the public-node minimum).
+# The run guide is in README_BZE.md, section "Mainnet run".
+
+template_version: 24
+strategy: pure_market_making
+
+exchange: beezee
+
+# BZE quoted in USDC bridged from Injective (USDC.inj), market id
+#   ubze/ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838
+# The connector names pairs from the chain's denom metadata. That metadata gives USDC.inj the symbol below and no
+# display unit, so the bot counts it in base units (1 = 0.000001 USDC) and quotes BZE at about 333 of them
+# (0.000333 USDC). USDC.n (ibc/6490A7EA...) lists as BZE-UUSDC: do not pick it.
+market: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+
+bid_spread: 1.0
+ask_spread: 1.0
+minimum_spread: -100
+order_refresh_time: 30
+max_order_age: 1800
+order_refresh_tolerance_pct: 0.2
+
+# BZE per order. Placeholder: set your own size. The chain's minimum order is ceil(1 / chain price) x 2 base
+# units, with chain price = USDC base units per ubze (0.000333 -> 6008 ubze = 0.006008 BZE).
+# Check it against the lowest bid level, the cheapest price this config places.
+order_amount: 1
+
+price_ceiling: -1
+price_floor: -1
+moving_price_band_enabled: false
+ping_pong_enabled: false
+
+inventory_skew_enabled: true
+inventory_target_base_pct: 50
+inventory_range_multiplier: 1
+
+order_levels: 5
+order_level_amount: 0
+order_level_spread: 0.5
+filled_order_delay: 30
+
+hanging_orders_enabled: false
+order_optimization_enabled: false
+add_transaction_costs: false
+
+# Prices come from the BeeZee book itself. Hummingbot cannot start on an empty book: seed one bid and one ask first
+# (see README_BZE.md, "Seeding the book").
+price_source: current_market
+price_type: mid_price
+
+should_wait_order_cancel_confirmation: true
