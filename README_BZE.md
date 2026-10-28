@@ -193,6 +193,69 @@ Same steps as the testnet run, with:
   then `import beezee_pmm_bze_usdc.yml` and `start`.
 - The book must have a bid and an ask (see "Seeding the book"). Cancel-all check after `stop` in dex.getbze.com.
 
+## Volume target
+
+`scripts/beezee_volume_target.py` prints a set daily volume on one order-book market by self-filling. Every
+`cycle_seconds` it sells and buys the same amount at the same price, in one batch tx. The price sits strictly inside
+the current spread, so the first leg rests as the new best order and the second meets it at exactly its price: the
+two fill each other, no other trader's order is taken, and the inventory stays where it was apart from fees. Tradebin
+accepts a self-fill from one wallet. The side that goes first alternates every cycle.
+
+Each cycle:
+
+1. **Leftover legs.** An order of an earlier cycle that is still open (one leg filled, or someone took one side) is
+   cancelled, and the cycle waits. Only volume that filled counts, and a self-filled trade counts once.
+2. **Size.** `(daily_volume_quote - filled today) / cycles left in the UTC day`, converted to base units at the trade
+   price, clamped to `[min_order_amount, max_order_amount]` and raised to the chain minimum at that price. Once the
+   target is reached it idles until UTC midnight, when the day's counters start from zero.
+3. **Price.** With the best bid `b`, the best ask `a` and the price tick `t`: if a side is empty or `a - b <= t`, the
+   cycle is skipped. Otherwise `p = clamp(anchor, b + t, a - t)`, rounded down to the tick.
+4. **Costs.** Fees and gas are counted in BZE. Reaching `max_daily_fee_spend` stops it until UTC midnight.
+
+`status` shows the target, filled and remaining volume, the anchor with its source and age, the book mid, the day's
+fees + gas, the cost per 1,000 quote units of volume and why the last cycle skipped.
+
+**Anchor.** Where in the spread the trades print, which becomes the chart price and reaches CoinGecko through the
+aggregator. It is the volume-weighted `converted_last.usd` of CoinGecko's tickers for `coingecko_id_base`, leaving out
+the venues in `exclude_markets` (default `BeeZee DEX`: CoinGecko's own BZE price includes this DEX, which the script
+would come to dominate) and tickers CoinGecko flags as stale or anomalous. It is divided by the USD price of
+`coingecko_id_quote` (1 when unset) and multiplied by `anchor_price_scale` to get the connector's price units: 1000000
+for BZE/USDC.inj, whose quote the bot counts in base units. It refreshes every `anchor_refresh_seconds` (two requests;
+300 fits the public rate limit). An optional API key comes from the `COINGECKO_API_KEY` env var (demo tier;
+`COINGECKO_API_TIER=PRO` for a pro key), never from the yml.
+
+- No `coingecko_id_base` (most community tokens), no external ticker, or an anchor older than
+  `anchor_max_age_seconds`: `anchor_fallback` applies, either `book_mid` (trade at the mid of best bid and ask) or
+  `pause`. A failed refresh keeps the previous anchor until it is too old.
+- When the book mid is more than `max_anchor_deviation_pct` away from the anchor, the cycle pauses: volume there would
+  print an off-market price, and fixing the book is arbitrage's job. Not checked on the `book_mid` fallback.
+
+**Cost.** Tradebin charges each order its fee at creation: the leg that rests pays the maker fee, the one that fills it
+the taker fee (mainnet: 0.001 + 0.1 BZE). The tx pays gas once for both legs. On mainnet a cycle costs about 0.105 BZE,
+so about 30 BZE a day at `cycle_seconds: 300`, whatever the volume. The wallet needs the BZE for that, the base for the
+sell leg and the quote for the buy leg; a cycle without both balances is skipped. The counters live in memory: a
+restart starts the day's volume and spend from zero.
+
+**Run.** `cp conf/scripts/beezee_volume_target.yml.example hb/conf/scripts/beezee_volume_target.yml` (mount
+`hb/conf` as in "Running the image"), set `daily_volume_quote` and `max_daily_fee_spend`, then in the client:
+`start --script beezee_volume_target.py --conf beezee_volume_target.yml`. The example is for BZE/USDC.inj on mainnet
+and documents every key; a test loads it.
+
+**Testnet.** Testnet has no CoinGecko price, so leave `coingecko_id_base` empty with `anchor_fallback: book_mid`, set
+`trading_pair: ULMN-TUSDC`, `anchor_price_scale: 1` and a small `daily_volume_quote`. The book needs a bid and an ask
+several ticks apart (see "Seeding the book"). Checks:
+
+- [ ] With `cycle_seconds: 60`, run for about 30 minutes: the filled volume BZE Scan shows for the bot's address
+      matches what `status` reports.
+- [ ] Each cycle is one tx holding a sell and a buy at the same price, strictly between the best bid and ask of that
+      moment; the side that goes first alternates.
+- [ ] No other address's order was filled by the bot: every trade of the bot's address has the bot on both sides.
+- [ ] Base and quote balances are unchanged apart from fees + gas.
+- [ ] With `max_daily_fee_spend` set low (e.g. 0.5), it stops after a few cycles with "daily fee cap reached".
+- [ ] A spread of one tick (or an empty side) skips the cycle with that reason in `status`.
+- [ ] Take one leg from a second wallet before it fills: the next cycle cancels the other leg, and only the filled
+      amount counts.
+
 ## Connector behaviour on chain v8.2.0
 
 - **Wallet modes.** `wallet` takes a hex private key. `wallet_mnemonic` takes a BIP39 mnemonic (optional passphrase)
