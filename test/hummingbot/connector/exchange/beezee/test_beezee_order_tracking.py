@@ -119,10 +119,12 @@ METADATA = {
 }
 
 
-class BeezeeOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
-    """Order lifecycle against mocked REST and RPC, driven through buy/sell/cancel and the status update loop."""
+class BeezeeChainTestCase(unittest.IsolatedAsyncioTestCase):
+    """Harness: the connector against mocked REST and RPC, driven through buy/sell/cancel and the status update loop."""
 
     level = 0
+    # Connector settings beyond the network and the wallet.
+    config_overrides: Dict[str, Any] = {}
 
     def handle(self, record):
         self.log_records.append(record)
@@ -139,6 +141,7 @@ class BeezeeOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
             connector="beezee",
             network=BeezeeCustomNetworkMode(rest_endpoint=REST_URL, rpc_endpoint=RPC_URL, chain_id="beezee-1"),
             account_type=BeezeeMnemonicWalletAccountMode(mnemonic=TEST_MNEMONIC),
+            **self.config_overrides,
         )
         self.exchange = BeezeeExchange(connector_configuration=config, trading_pairs=["BZE-USDC", "TKN-BZE"])
         self.assertEqual(ADDRESS, self.exchange._account_address)
@@ -193,9 +196,12 @@ class BeezeeOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
         api.get(f"{REST_URL}{CONSTANTS.ACCOUNT_INFO_PATH_URL}/{ADDRESS}", repeat=True, payload={
             "account": {"account_number": "7", "sequence": "3"},
         })
-        api.post(f"{REST_URL}{CONSTANTS.SIMULATE_TX_PATH_URL}", repeat=True, payload={"gas_info": {"gas_used": "200000"}})
+        self._mock_simulate()
         api.get(f"{REST_URL}{CONSTANTS.BALANCES_PATH_URL}/{ADDRESS}", repeat=True, payload={"balances": []})
         api.get(re.compile(rf"^{re.escape(REST_URL + CONSTANTS.ALL_USER_DUST_PATH_URL)}(\?.*)?$"), repeat=True, payload={"list": []})
+
+    def _mock_simulate(self):
+        self.mock_api.post(f"{REST_URL}{CONSTANTS.SIMULATE_TX_PATH_URL}", repeat=True, payload={"gas_info": {"gas_used": "200000"}})
 
     def _mock_broadcast(self, tx_hash: str):
         self.mock_api.post(f"{REST_URL}{CONSTANTS.BROADCAST_TX_PATH_URL}", payload={"tx_response": {"code": 0, "txhash": tx_hash}})
@@ -294,6 +300,10 @@ class BeezeeOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
             amount=amount, price=Decimal("0.0003"), creation_timestamp=1.0, exchange_order_id=exchange_order_id,
             initial_state=OrderState.OPEN,
         )
+
+
+class BeezeeOrderTrackingTests(BeezeeChainTestCase):
+    """Order lifecycle against mocked REST and RPC, driven through buy/sell/cancel and the status update loop."""
 
     # --- fixtures ---
 

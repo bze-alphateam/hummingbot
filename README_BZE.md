@@ -96,6 +96,16 @@ Use a dedicated trading wallet that holds only the funds the bot should trade wi
   failed. A partial fill whose rest the chain refunds ends `CANCELED` with its fills. After a restart, missed fills
   are read back from the last processed block (up to 1000 blocks); beyond that the connector reconciles resting
   orders from the chain and logs a warning. The RPC endpoint must serve `/block_results` for recent heights.
+- **Batched txs.** Creates and cancels go out in batch txs: all messages submitted within `batch_window_ms`
+  (default `300`) of the first one share one tx, simulated, signed and broadcast once, with at most
+  `max_messages_per_tx` messages (default `25`; a larger batch is split into consecutive txs). Cancels come first, so
+  stale levels leave the book in the same tx that places the new ones. `batch_order_create` / `batch_order_cancel`
+  send their tx as soon as every order of the call is submitted, without waiting for the window. If the chain refuses
+  a batch in simulation, the creates on a market it names as halted are failed and the rest is simulated once more;
+  any other refusal sends each message in its own tx, so only the bad order fails with the chain's error. A sequence
+  mismatch re-signs the whole batch once. The 30 tx/min limit counts batch txs, and the messages of one tx share one
+  tx lookup. Both settings are top-level keys of the connector config (`batch_window_ms: 0` still batches whatever
+  is submitted together, but waits for nothing).
 - **Fee bookkeeping.** The chain charges the tradebin fee once per order when the create runs, so the connector books
   it on the order's first fill only. An order that rests and never fills still paid the maker fee, which Hummingbot
   cannot record without a fill.

@@ -16,6 +16,10 @@ network:
   gas_price: "0.01"
   gas_adjustment: "1.3"
 
+# Creates and cancels submitted within this many ms share one tx, at most max_messages_per_tx messages per tx.
+batch_window_ms: 300
+max_messages_per_tx: 25
+
 account_type:
   name: "wallet"
   private_key: "replace with 32-byte hex private key"

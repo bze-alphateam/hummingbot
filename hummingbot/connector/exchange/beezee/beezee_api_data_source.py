@@ -440,16 +440,22 @@ class BeezeeAPIDataSource:
             memo=memo,
         )
 
-    async def broadcast_create_order(self, market: BeezeeMarket, order_type: str, amount: Decimal, price: Decimal, memo: str = "") -> Dict[str, Any]:
+    def create_order_message(self, market: BeezeeMarket, order_type: str, amount: Decimal, price: Decimal) -> bytes:
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required for order creation.")
-        message = msg_create_order(self._signer.address, order_type, display_amount_to_chain(amount, market.base), display_price_to_chain(price, market), market.market_id)
+        return msg_create_order(self._signer.address, order_type, display_amount_to_chain(amount, market.base), display_price_to_chain(price, market), market.market_id)
+
+    def cancel_order_message(self, market_id: str, order_type: str, order_id: str) -> bytes:
+        if self._signer is None:
+            raise ValueError("Beezee wallet mode is required for cancels.")
+        return msg_cancel_order(self._signer.address, market_id, order_id, order_type)
+
+    async def broadcast_create_order(self, market: BeezeeMarket, order_type: str, amount: Decimal, price: Decimal, memo: str = "") -> Dict[str, Any]:
+        message = self.create_order_message(market, order_type, amount, price)
         return await self.simulate_sign_and_broadcast([message], memo=memo)
 
     async def broadcast_cancel_order(self, market_id: str, order_type: str, order_id: str, memo: str = "") -> Dict[str, Any]:
-        if self._signer is None:
-            raise ValueError("Beezee wallet mode is required for cancels.")
-        message = msg_cancel_order(self._signer.address, market_id, order_id, order_type)
+        message = self.cancel_order_message(market_id, order_type, order_id)
         return await self.simulate_sign_and_broadcast([message], memo=memo)
 
     def fingerprint_history_trade(self, trade: Dict[str, Any]) -> str:

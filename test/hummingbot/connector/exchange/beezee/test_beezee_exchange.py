@@ -26,6 +26,10 @@ from hummingbot.core.event.event_logger import EventLogger
 from hummingbot.core.event.events import MarketEvent
 
 
+async def no_wait(_delay: float):
+    await asyncio.sleep(0)
+
+
 class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
     level = 0
 
@@ -62,6 +66,8 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
                 },
             },
         )
+        # The batch window and the tx lookup delays pass at once.
+        self.exchange._sleep = no_wait
         self.exchange.logger().setLevel(1)
         self.exchange.logger().addHandler(self)
 
@@ -83,7 +89,11 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         data_source.get_market_by_trading_pair = AsyncMock(return_value=self.market)
         data_source.get_halted_denoms = AsyncMock(side_effect=halted_denoms)
         data_source.get_user_market_orders = AsyncMock(return_value=[])
-        data_source.broadcast_create_order = AsyncMock(return_value={"tx_response": {"code": 0, "txhash": "AB" * 32}})
+        data_source.create_order_message = Mock(
+            side_effect=lambda market, order_type, amount, price: f"create:{order_type}:{amount}@{price}".encode()
+        )
+        data_source.cancel_order_message = Mock(side_effect=lambda market_id, order_type, order_id: f"cancel:{order_id}".encode())
+        data_source.simulate_sign_and_broadcast = AsyncMock(return_value={"tx_response": {"code": 0, "txhash": "AB" * 32}})
         self.exchange._data_source = data_source
         self.exchange._signer = Mock()
         return data_source
@@ -201,13 +211,13 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.exchange._signer = Mock()
         data_source = Mock()
         data_source.get_market_by_trading_pair = AsyncMock(return_value=self.market)
-        data_source.broadcast_cancel_order = AsyncMock()
+        data_source.simulate_sign_and_broadcast = AsyncMock()
         self.exchange._data_source = data_source
 
         canceled = await self.exchange._place_cancel(order.client_order_id, order)
 
         self.assertFalse(canceled)
-        data_source.broadcast_cancel_order.assert_not_awaited()
+        data_source.simulate_sign_and_broadcast.assert_not_awaited()
 
     @aioresponses()
     async def test_get_fee_uses_v820_tradebin_coin_fees(self, mock_api):
@@ -243,7 +253,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
             await self._place_buy()
 
         self.assertEqual("Beezee market ubze/uusdc is halted (denom uusdc)", str(context.exception))
-        data_source.broadcast_create_order.assert_not_awaited()
+        data_source.simulate_sign_and_broadcast.assert_not_awaited()
         data_source.get_user_market_orders.assert_not_awaited()
 
     async def _drain_tasks(self):
@@ -263,7 +273,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_halt_transition_cancels_open_orders_once(self):
         data_source = self._halt_data_source([{"ubze"}, {"ubze"}])
-        data_source.broadcast_cancel_order = AsyncMock(return_value={"tx_response": {"code": 0, "txhash": "CA" * 32}})
+        data_source.simulate_sign_and_broadcast = AsyncMock(return_value={"tx_response": {"code": 0, "txhash": "CA" * 32}})
         self._track_order("OID-OPEN", "000000000000000000000042")
 
         await self._force_halted_denoms_refresh()
@@ -271,56 +281,56 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         await self._force_halted_denoms_refresh()
         await self._drain_tasks()
 
-        data_source.broadcast_cancel_order.assert_awaited_once()
-        self.assertEqual("000000000000000000000042", data_source.broadcast_cancel_order.call_args.kwargs["order_id"])
+        data_source.simulate_sign_and_broadcast.assert_awaited_once()
+        self.assertEqual([b"cancel:000000000000000000000042"], data_source.simulate_sign_and_broadcast.call_args.args[0])
         self.assertTrue(self.exchange.in_flight_orders["OID-OPEN"].is_pending_cancel_confirmation)
         self.assertEqual(1, self._logged(logging.WARNING, "Beezee market BZE-USDC is halted (denom ubze)"))
 
     async def test_halt_cancel_is_retried_once_the_exchange_order_id_resolves(self):
         data_source = self._halt_data_source([{"ubze"}, {"ubze"}])
-        data_source.broadcast_cancel_order = AsyncMock(return_value={"tx_response": {"code": 0, "txhash": "CA" * 32}})
+        data_source.simulate_sign_and_broadcast = AsyncMock(return_value={"tx_response": {"code": 0, "txhash": "CA" * 32}})
         self._track_order("OID-QUEUED")
 
         await self._force_halted_denoms_refresh()
         await self._drain_tasks()
-        data_source.broadcast_cancel_order.assert_not_awaited()
+        data_source.simulate_sign_and_broadcast.assert_not_awaited()
 
         # The create queued before the halt executed after all: its order id is now known.
         self.exchange.in_flight_orders["OID-QUEUED"].update_exchange_order_id("000000000000000000000043")
         await self._force_halted_denoms_refresh()
         await self._drain_tasks()
 
-        data_source.broadcast_cancel_order.assert_awaited_once()
-        self.assertEqual("000000000000000000000043", data_source.broadcast_cancel_order.call_args.kwargs["order_id"])
+        data_source.simulate_sign_and_broadcast.assert_awaited_once()
+        self.assertEqual([b"cancel:000000000000000000000043"], data_source.simulate_sign_and_broadcast.call_args.args[0])
 
     async def test_failed_halt_cancel_is_retried_on_the_next_poll(self):
         data_source = self._halt_data_source([{"ubze"}])
-        data_source.broadcast_cancel_order = AsyncMock(side_effect=[
+        data_source.simulate_sign_and_broadcast = AsyncMock(side_effect=[
             IOError("Beezee tx broadcast failed: timed out"),
             {"tx_response": {"code": 0, "txhash": "CA" * 32}},
         ])
         self._track_order("OID-OPEN", "000000000000000000000044")
 
         await self._status_poll()
-        self.assertEqual(1, data_source.broadcast_cancel_order.await_count)
+        self.assertEqual(1, data_source.simulate_sign_and_broadcast.await_count)
         # The halted list is not due again: only the status poll's re-cancel runs.
         await self._status_poll()
 
         self.assertEqual(1, data_source.get_halted_denoms.await_count)
-        self.assertEqual(2, data_source.broadcast_cancel_order.await_count)
+        self.assertEqual(2, data_source.simulate_sign_and_broadcast.await_count)
         self.assertTrue(self.exchange.in_flight_orders["OID-OPEN"].is_pending_cancel_confirmation)
 
     async def test_unhalt_stops_cancelling_and_logs_once(self):
         data_source = self._halt_data_source([{"ubze"}, set(), set(), set()])
-        data_source.broadcast_cancel_order = AsyncMock(side_effect=IOError("Beezee tx broadcast failed: timed out"))
+        data_source.simulate_sign_and_broadcast = AsyncMock(side_effect=IOError("Beezee tx broadcast failed: timed out"))
         self._track_order("OID-OPEN", "000000000000000000000045")
 
         await self._status_poll()
-        self.assertEqual(1, data_source.broadcast_cancel_order.await_count)
+        self.assertEqual(1, data_source.simulate_sign_and_broadcast.await_count)
         for _ in range(3):
             await self._status_poll(force_halted_refresh=True)
 
-        self.assertEqual(1, data_source.broadcast_cancel_order.await_count)
+        self.assertEqual(1, data_source.simulate_sign_and_broadcast.await_count)
         self.assertEqual(1, self._logged(logging.INFO, "Beezee market BZE-USDC is no longer halted"))
         self.assertFalse(self.exchange.in_flight_orders["OID-OPEN"].is_done)
 
@@ -346,7 +356,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
             [(order_id, "Beezee market ubze/uusdc is halted (denom uusdc)", "ValueError")],
             [(event.order_id, event.error_message, event.error_type) for event in failure_logger.event_log],
         )
-        data_source.broadcast_create_order.assert_not_awaited()
+        data_source.simulate_sign_and_broadcast.assert_not_awaited()
 
     async def test_halted_denoms_refresh_waits_for_the_interval(self):
         data_source = self._halt_data_source([set(), set(), set()])
@@ -362,7 +372,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
     async def test_denom_halted_refusal_marks_pair_halted(self):
         # The node's halted list lags behind the refusal, so the market itself is marked halted.
         data_source = self._halt_data_source([set(), set()])
-        data_source.broadcast_create_order = AsyncMock(side_effect=BeezeeTxRefusedError(
+        data_source.simulate_sign_and_broadcast = AsyncMock(side_effect=BeezeeTxRefusedError(
             "simulation", "failed to execute message; message index: 0: market ubze/uusdc is halted: denom is halted",
         ))
 
@@ -372,7 +382,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
             await self._place_buy("OID-2")
 
         self.assertIn("Beezee market ubze/uusdc is halted", str(context.exception))
-        self.assertEqual(1, data_source.broadcast_create_order.await_count)
+        self.assertEqual(1, data_source.simulate_sign_and_broadcast.await_count)
         self.assertEqual(1, self._logged(logging.WARNING, "Beezee market BZE-USDC is halted"))
 
     async def test_delivered_create_tx_with_code_4017_marks_pair_halted(self):
@@ -382,10 +392,6 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
             "code": 4017, "codespace": "tradebin", "raw_log": "denom is halted", "height": "100",
         }})
 
-        async def no_wait(_delay: float):
-            await asyncio.sleep(0)
-
-        self.exchange._sleep = no_wait
         self.exchange.start_tracking_order(
             order_id="OID-D",
             exchange_order_id=None,
@@ -403,7 +409,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError) as context:
             await self._place_buy()
         self.assertEqual("Beezee market ubze/uusdc is halted (denom unknown, refused by the chain)", str(context.exception))
-        data_source.broadcast_create_order.assert_awaited_once()
+        data_source.simulate_sign_and_broadcast.assert_awaited_once()
 
     async def test_unhalt_allows_trading_again(self):
         data_source = self._halt_data_source([{"ubze"}, set()])
@@ -415,7 +421,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         tx_hash, _ = await self._place_buy("OID-2")
 
         self.assertEqual("AB" * 32, tx_hash)
-        data_source.broadcast_create_order.assert_awaited_once()
+        data_source.simulate_sign_and_broadcast.assert_awaited_once()
         self.assertEqual(1, self._logged(logging.INFO, "Beezee market BZE-USDC is no longer halted"))
 
     @aioresponses()

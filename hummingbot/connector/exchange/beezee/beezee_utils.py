@@ -434,6 +434,16 @@ class BeezeeConfigMap(BaseConnectorConfigMap):
         discriminator="name",
         json_schema_extra={"prompt": f"Select the Beezee account type ({'/'.join(ACCOUNT_MODES)})", "prompt_on_new": True},
     )
+    batch_window_ms: int = Field(
+        default=CONSTANTS.DEFAULT_BATCH_WINDOW_MS,
+        ge=0,
+        json_schema_extra={"prompt": "Enter the window in ms in which creates and cancels are batched into one tx"},
+    )
+    max_messages_per_tx: int = Field(
+        default=CONSTANTS.DEFAULT_MAX_MESSAGES_PER_TX,
+        ge=1,
+        json_schema_extra={"prompt": "Enter the maximum number of order messages in one tx"},
+    )
     model_config = ConfigDict(title="beezee")
 
     @field_validator("network", mode="before")
