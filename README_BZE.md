@@ -103,8 +103,9 @@ USDC.n lists as `BZE-UUSDC`. To see every pair the connector knows, run `create`
 
 ### Seeding the book
 
-Hummingbot reads the mid price from the book and does not start quoting on an empty or one-sided book. Before the first `start`, make sure the market has at least one bid and one ask: place them from a
-second wallet in the dex app (testnet: testnet-dex.getbze.com, mainnet: dex.getbze.com), or let the
+Hummingbot reads the mid price from the book and does not start quoting on an empty or one-sided book. Before the
+first `start`, make sure the market has at least one bid and one ask: place them from a second wallet in the dex app
+(testnet: testnet-dex.getbze.com, mainnet: dex.getbze.com), or let the
 [tradebin-mm](https://github.com/faneaatiku/tradebin-mm) stopgap bot quote the market. Prices anchored to the
 liquidity pool come later.
 
