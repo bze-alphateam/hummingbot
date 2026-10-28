@@ -163,6 +163,16 @@ class BeezeeOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
         await self.exchange._update_trading_rules()
         self.broadcasts: List[str] = []
 
+    async def asyncTearDown(self) -> None:
+        # Nothing the connector started may outlive the test.
+        await self.exchange.stop_network()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        leftover = [task for task in asyncio.all_tasks() if task is not asyncio.current_task() and not task.done()]
+        for task in leftover:
+            task.cancel()
+        self.assertEqual([], [task.get_coro() for task in leftover])
+
     def _mock_chain_state(self):
         api = self.mock_api
         api.get(re.compile(rf"^{re.escape(REST_URL + CONSTANTS.TRADING_PAIRS_PATH_URL)}(\?.*)?$"), repeat=True, payload={

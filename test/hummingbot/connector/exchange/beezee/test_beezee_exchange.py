@@ -62,6 +62,16 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.exchange.logger().setLevel(1)
         self.exchange.logger().addHandler(self)
 
+    async def asyncTearDown(self) -> None:
+        # Nothing the connector started may outlive the test.
+        await self.exchange.stop_network()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        leftover = [task for task in asyncio.all_tasks() if task is not asyncio.current_task() and not task.done()]
+        for task in leftover:
+            task.cancel()
+        self.assertEqual([], [task.get_coro() for task in leftover])
+
     def tearDown(self) -> None:
         self.exchange.logger().removeHandler(self)
 

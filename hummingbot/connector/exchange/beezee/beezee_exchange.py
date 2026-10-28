@@ -375,6 +375,14 @@ class BeezeeExchange(ExchangePyBase):
     async def _update_trading_fees(self):
         self._trade_fees = await self._build_data_source().get_trade_fees()
 
+    async def stop_network(self):
+        await super().stop_network()
+        # Tx lookups and halt cancels are restarted from the saved state by the next status update.
+        for task in list(self._tx_lookup_tasks.values()) + list(self._halt_cancel_tasks.values()):
+            task.cancel()
+        self._tx_lookup_tasks.clear()
+        self._halt_cancel_tasks.clear()
+
     async def _status_polling_loop_fetch_updates(self):
         await super()._status_polling_loop_fetch_updates()
         await self._update_halted_denoms_if_due()
