@@ -198,11 +198,24 @@ Same steps as the testnet run, with:
 - **Wallet modes.** `wallet` takes a hex private key. `wallet_mnemonic` takes a BIP39 mnemonic (optional passphrase)
   and derives the key on `hd_path`, default `m/44'/118'/0'/0/0`, the same as `bzed keys add --recover`. The
   derivation is pinned by a test against the address `bzed` v8.2.0 recovers from the public BIP39 test mnemonic.
-- **Gas.** Every create and cancel is simulated first. Gas limit = `ceil(gas_used × gas_adjustment)`, fee =
-  `ceil(gas limit × gas_price)` in ubze. Defaults: `gas_price` `0.01` (the mainnet public-node minimum),
-  `gas_adjustment` `1.3`. Both are network settings. A failed simulation is never broadcast. The fixed
+- **Gas.** Every create and cancel is simulated first. Gas limit = `ceil(gas_used × gas_adjustment)` + the queue
+  extra below, fee = `ceil(gas limit × gas_price)` in ubze. Defaults: `gas_price` `0.01` (the mainnet public-node
+  minimum), `gas_adjustment` `1.3`. Both are network settings. A failed simulation is never broadcast. The fixed
   `create_order_gas_limit` / `cancel_order_gas_limit` settings are gone, and old configs that still have them load
   and ignore them.
+- **Several orders in one block.** Tradebin queues every create and cancel and runs the queue at the end of the
+  block. A create pays extra gas for each message already queued on its market in that block: the tradebin param
+  `orderBookQueueMessageScanExtraGas` (5000) plus the store reads of that message (about 6,200 gas per message on
+  testnet). The simulation runs on the last committed state, where the queue is empty, so it cannot see this. With
+  `gas_adjustment` alone, the tenth single-create tx of a burst would need about 1.53× its simulated gas: the txs
+  beyond 1.3× ran out of gas (code 11). So, for each create, the connector adds that per-message gas once for every
+  message of its own still waiting for a block on the same market (its tx was broadcast but is not found in a block
+  yet). The scan param is read from the chain with the trading fees. Messages of other accounts in the same block
+  are not known in advance: the `gas_adjustment` slack covers about three of them for a single create. Once a block
+  holds more than `orderBookExtraGasWindow` (100) queued tradebin messages, each further create also pays
+  `orderBookQueueExtraGas` (25,000) per message over that window, which the connector cannot foresee: on such a busy
+  block creates cost much more and may run out of gas. A create that runs out of gas fails like any other failed
+  create tx.
 - **Trading fees.** The tradebin maker/taker fees (flat amounts, in ubze on mainnet) are read from the chain params
   and added to every order's fee estimate, so PnL and profitability checks include them.
 - **Halted markets.** A market whose base or quote denom is halted by governance is exit-only: the connector refuses

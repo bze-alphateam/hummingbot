@@ -78,6 +78,7 @@ class SentTx:
     messages: List[SentMessage]
     memo: str
     sequence: int
+    gas_limit: int = 0
 
     @property
     def kinds(self) -> List[str]:
@@ -101,7 +102,8 @@ def decode_tx(request_kwargs: Dict[str, Any]) -> SentTx:
             assert type_url == "/bze.tradebin.MsgCancelOrder" and text[1] == ADDRESS
             messages.append(SentMessage("cancel", text[2], text[4], order_id=text[3]))
     signer_info = _fields(_first(auth_info, 1))
-    return SentTx(messages, _first(body, 2, b"").decode(), _first(signer_info, 3, 0))
+    fee = _fields(_first(auth_info, 2, b""))
+    return SentTx(messages, _first(body, 2, b"").decode(), _first(signer_info, 3, 0), _first(fee, 2, 0))
 
 
 @dataclass
@@ -127,6 +129,8 @@ class FakeNode:
     check_tx_gate: Optional[asyncio.Future] = None
     # While set, a simulation reaches the node but its answer waits for this future.
     simulate_gate: Optional[asyncio.Future] = None
+    # While set, landed txs are not in a block yet: tx queries wait for this future.
+    block_gate: Optional[asyncio.Future] = None
 
     @property
     def height(self) -> int:
@@ -208,7 +212,9 @@ class FakeNode:
             "height": str(height), "txs_results": None, "finalize_block_events": [],
         }})
 
-    def get_tx(self, url, **kwargs) -> CallbackResult:
+    async def get_tx(self, url, **kwargs) -> CallbackResult:
+        if self.block_gate is not None:
+            await self.block_gate
         response = self.txs.get(URL(url).path.rsplit("/", 1)[-1])
         if response is None:
             return CallbackResult(status=404, payload={"code": 5, "message": "tx not found"})
@@ -772,3 +778,96 @@ class BeezeeMaxMessagesPerTxTests(BeezeeBatchingTestCase):
         await self._run_until(lambda: all(len(self._exchange_id(order) or "") == 24 for order in orders), "not rested")
         for order in orders:
             self._assert_rests_as_sent(order)
+
+
+# Gas a create on BZE-USDC pays per message queued before it on that market in the same block: the chain's default
+# orderBookQueueMessageScanExtraGas (5000) + 30 per iterator step + 3 per byte of 2 * 73 market id bytes + 200 others.
+BZE_USDC_QUEUED_MESSAGE_GAS = 6068
+# The fake node simulates 80000 gas per message; with gas adjustment 1.3:
+CREATE_GAS = 104000
+
+
+class BeezeeQueuedAheadGasTests(BeezeeBatchingTestCase):
+    """Tradebin charges each create for the messages queued before it on its market in the same block. The simulation
+    runs on the last committed state and cannot see them, so the connector adds that gas for its own messages whose
+    tx is not in a block yet."""
+
+    async def _send_alone(self, place: Callable[[], str]) -> str:
+        client_order_id = place()
+        await self._settle()
+        self.windows[-1].set_result(None)
+        await self._settle()
+        return client_order_id
+
+    def _gas_limits(self) -> List[int]:
+        return [sent.gas_limit for _, sent in self.node.landed]
+
+    async def test_creates_pay_for_the_accounts_messages_queued_ahead_on_their_market(self):
+        self.node.block_gate = asyncio.get_event_loop().create_future()
+
+        await self._send_alone(lambda: self.exchange.buy("BZE-USDC", Decimal("10"), OrderType.LIMIT, Decimal("0.0003")))
+        await self._send_alone(lambda: self.exchange.sell("BZE-USDC", Decimal("11"), OrderType.LIMIT, Decimal("0.0007")))
+        # Another market's queue is not scanned.
+        await self._send_alone(lambda: self.exchange.buy("TKN-BZE", Decimal("12"), OrderType.LIMIT, Decimal("0.5")))
+        # Two creates behind the two queued BZE-USDC messages; the simulation already counts the tx's own messages.
+        self.exchange.batch_order_create(self._ladder(2))
+        await self._settle()
+
+        self.assertEqual([1, 1, 1, 2], [len(sent.messages) for _, sent in self.node.landed])
+        self.assertEqual(
+            [
+                CREATE_GAS,
+                CREATE_GAS + BZE_USDC_QUEUED_MESSAGE_GAS,
+                CREATE_GAS,
+                2 * CREATE_GAS + 2 * 2 * BZE_USDC_QUEUED_MESSAGE_GAS,
+            ],
+            self._gas_limits(),
+        )
+
+        # Once their txs are in a block, the queue is executed at that block's end: nothing is ahead any more.
+        self.node.block_gate.set_result(None)
+        await self._run_until(lambda: not self.exchange._queued_creates, "outcomes not read")
+        await self._send_alone(lambda: self.exchange.buy("BZE-USDC", Decimal("13"), OrderType.LIMIT, Decimal("0.0002")))
+
+        self.assertEqual(CREATE_GAS, self._gas_limits()[-1])
+
+    async def test_a_message_whose_tx_is_in_a_block_is_not_ahead_even_before_its_outcome_is_read(self):
+        def unsaved(client_order_id: str, tx_hash: str) -> InFlightOrder:
+            return InFlightOrder(
+                client_order_id=client_order_id, trading_pair="BZE-USDC", order_type=OrderType.LIMIT,
+                trade_type=TradeType.BUY, amount=Decimal("5"), price=Decimal("0.0002"), creation_timestamp=1.0,
+                exchange_order_id=tx_hash, initial_state=OrderState.OPEN,
+            )
+
+        self.node.block_gate = asyncio.get_event_loop().create_future()
+        self._restore([unsaved("OID-IN-BLOCK", "AA" * 32), unsaved("OID-PENDING", "BB" * 32)], {
+            "last_processed_height": H,
+            "creates": {
+                "OID-IN-BLOCK": {
+                    "client_order_id": "OID-IN-BLOCK", "tx_hash": "AA" * 32, "msg_index": 0,
+                    "tx_height": H + 1, "message_id": f"{0:024d}", "next_height": H + 1,
+                },
+                "OID-PENDING": {"client_order_id": "OID-PENDING", "tx_hash": "BB" * 32, "msg_index": 0},
+            },
+            "cancels": {},
+        })
+
+        await self._send_alone(lambda: self.exchange.buy("BZE-USDC", Decimal("10"), OrderType.LIMIT, Decimal("0.0003")))
+
+        self.assertEqual([CREATE_GAS + BZE_USDC_QUEUED_MESSAGE_GAS], self._gas_limits())
+        self.node.block_gate.set_result(None)
+
+    async def test_a_queued_cancel_counts_ahead_of_a_create_but_a_cancel_pays_nothing_extra(self):
+        await self._restore_resting([self._resting("OID-OLD", "BZE-USDC", "000000000000000006810009", "12000000", "0.0006")])
+        self.node.block_gate = asyncio.get_event_loop().create_future()
+        await self._send_alone(lambda: self.exchange.buy("BZE-USDC", Decimal("10"), OrderType.LIMIT, Decimal("0.0003")))
+
+        await self._send_alone(lambda: self.exchange.cancel("BZE-USDC", "OID-OLD"))
+        await self._send_alone(lambda: self.exchange.buy("BZE-USDC", Decimal("11"), OrderType.LIMIT, Decimal("0.0002")))
+
+        self.assertEqual(["create", "cancel", "create"], [sent.kinds[0] for _, sent in self.node.landed])
+        self.assertEqual(
+            [CREATE_GAS, CREATE_GAS, CREATE_GAS + 2 * BZE_USDC_QUEUED_MESSAGE_GAS],
+            self._gas_limits(),
+        )
+        self.node.block_gate.set_result(None)
