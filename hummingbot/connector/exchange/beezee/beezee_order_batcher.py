@@ -46,7 +46,6 @@ class BeezeeOrderBatcher:
         self._expected: Set[str] = set()
         self._explicit = False
         self._flush_everything = False
-        self._sending: List[BatchedOrderMessage] = []
         self._window_task: Optional[asyncio.Task] = None
         self._flush_task: Optional[asyncio.Task] = None
 
@@ -74,14 +73,14 @@ class BeezeeOrderBatcher:
         return await asyncio.shield(item.result)
 
     def stop(self):
-        for task in (self._window_task, self._flush_task):
-            if task is not None:
-                task.cancel()
-        self._window_task = self._flush_task = None
+        """Fails the messages still waiting for their tx. A batch already being sent is left to finish: its tx may be
+        on chain already, and only its own send knows its outcome."""
+        if self._window_task is not None:
+            self._window_task.cancel()
+            self._window_task = None
         error = IOError("Beezee connector stopped before the order message was sent.")
-        for item in self._sending + list(self._cancels.values()) + list(self._creates.values()):
+        for item in list(self._cancels.values()) + list(self._creates.values()):
             item.reject(error)
-        self._sending = []
         self._cancels.clear()
         self._creates.clear()
         self._expected.clear()
@@ -125,7 +124,6 @@ class BeezeeOrderBatcher:
             # Messages arriving while everything is being sent go out right after, in the next tx.
             while self._queued >= self._max_messages or self._flush_everything and self._queued:
                 batch = self._next_batch()
-                self._sending = batch
                 try:
                     await self._send(batch)
                 except asyncio.CancelledError:
@@ -133,7 +131,6 @@ class BeezeeOrderBatcher:
                 except Exception as error:
                     for item in batch:
                         item.reject(error)
-                self._sending = []
         finally:
             if self._flush_task is asyncio.current_task():
                 self._flush_task = None

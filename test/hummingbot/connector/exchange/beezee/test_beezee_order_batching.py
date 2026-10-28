@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -122,6 +123,8 @@ class FakeNode:
     txs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     resting: Dict[str, SentMessage] = field(default_factory=dict)
     next_order_id: int = 6820000
+    # While set, a broadcast reaches the node but its answer waits for this future.
+    check_tx_gate: Optional[asyncio.Future] = None
 
     @property
     def height(self) -> int:
@@ -146,9 +149,11 @@ class FakeNode:
             return CallbackResult(status=400, payload={"code": 2, "message": refusal, "details": []})
         return CallbackResult(payload={"gas_info": {"gas_used": str(80000 * len(sent.messages))}})
 
-    def check_tx(self, url, **kwargs) -> CallbackResult:
+    async def check_tx(self, url, **kwargs) -> CallbackResult:
         sent = decode_tx(kwargs)
         self.broadcast.append(sent)
+        if self.check_tx_gate is not None:
+            await self.check_tx_gate
         if self.check_tx_answers:
             code, raw_log = self.check_tx_answers.pop(0)
             if "account sequence mismatch" in raw_log:
@@ -481,6 +486,24 @@ class BeezeeOrderBatchingTests(BeezeeBatchingTestCase):
         self.assertIn("is halted", self._failure_messages()[refused])
         self.assertEqual(2, len(self.node.simulated))
 
+    async def test_resent_batch_refused_again_is_sent_alone_and_logs_the_second_refusal(self):
+        amount_refusal = "failed to execute message; message index: 1: amount should be bigger than: 50000000: invalid order amount"
+
+        def refuse(sent: SentTx) -> Optional[str]:
+            if any(message.market_id == TKN_BZE for message in sent.messages):
+                return TKN_HALTED_REFUSAL
+            return amount_refusal if any(message.amount == "11000000" for message in sent.messages) else None
+
+        self.node.refuse_simulation = refuse
+        created = self.exchange.batch_order_create(self._ladder(2) + [self._limit_order("TKN-BZE", True, "0.38125", "133")])
+        await self._settle()
+
+        self.assertEqual([3, 2, 1, 1], [len(sent.messages) for sent in self.node.simulated])
+        self.assertEqual([f"hbot:{created[0].client_order_id}"], [sent.memo for _, sent in self.node.landed])
+        self.assertTrue(self._logged(logging.WARNING, f"Beezee batch of 2 messages was refused in simulation ({amount_refusal})"))
+        self.assertFalse(self._logged(logging.WARNING, f"refused in simulation ({TKN_HALTED_REFUSAL})"))
+        self.assertEqual({created[1].client_order_id, created[2].client_order_id}, set(self._failure_messages()))
+
     async def test_batch_refused_for_another_reason_sends_each_order_alone_and_fails_only_the_bad_one(self):
         refusal = "failed to execute message; message index: 1: amount should be bigger than: 50000000: invalid order amount"
         self.node.refuse_simulation = (
@@ -528,6 +551,24 @@ class BeezeeOrderBatchingTests(BeezeeBatchingTestCase):
         self.assertEqual(
             {order.client_order_id: f"Beezee order create failed: {mismatch}" for order in created}, self._failure_messages()
         )
+
+    async def test_stopping_while_a_batch_is_broadcast_keeps_following_its_orders(self):
+        # The network check failing (or a reconnect) stops the network while the node already has the tx.
+        self.node.check_tx_gate = asyncio.get_event_loop().create_future()
+        created = self.exchange.batch_order_create(self._ladder(2))
+        await self._run_until(lambda: len(self.node.broadcast) == 1, "the batch was not broadcast")
+
+        await self.exchange.stop_network()
+        self.node.check_tx_gate.set_result(None)
+        await self._settle()
+
+        self.assertEqual(1, len(self.node.landed))
+        self.assertEqual({}, self._failure_messages())
+        await self._run_until(
+            lambda: all(len(self._exchange_id(order.client_order_id) or "") == 24 for order in created), "not rested"
+        )
+        for order in created:
+            self._assert_rests_as_sent(order.client_order_id)
 
     async def test_stopping_with_a_batch_waiting_for_its_window_fails_its_orders_and_sends_nothing(self):
         order_id = self.exchange.buy("BZE-USDC", Decimal("10"), OrderType.LIMIT, Decimal("0.0003"))

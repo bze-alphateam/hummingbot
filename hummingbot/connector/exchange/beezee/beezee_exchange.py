@@ -379,10 +379,11 @@ class BeezeeExchange(ExchangePyBase):
             await self._broadcast_batch(items)
             return
         except BeezeeTxRefusedError as error:
-            if not self._is_message_refusal(error, items):
-                await self._reject_batch(items, error)
+            refusal = error
+            if not self._is_message_refusal(refusal, items):
+                await self._reject_batch(items, refusal)
                 return
-            remaining = await self._drop_halted_creates(items, error) if error.is_denom_halted else items
+            remaining = await self._drop_halted_creates(items, refusal) if refusal.is_denom_halted else items
             if not remaining:
                 return
             if len(remaining) < len(items):
@@ -391,11 +392,12 @@ class BeezeeExchange(ExchangePyBase):
                     await self._broadcast_batch(items)
                     return
                 except BeezeeTxRefusedError as retry_error:
-                    if not self._is_message_refusal(retry_error, items):
-                        await self._reject_batch(items, retry_error)
+                    refusal = retry_error
+                    if not self._is_message_refusal(refusal, items):
+                        await self._reject_batch(items, refusal)
                         return
             self.logger().warning(
-                f"Beezee batch of {len(items)} messages was refused in simulation ({error.chain_message}). "
+                f"Beezee batch of {len(items)} messages was refused in simulation ({refusal.chain_message}). "
                 f"Sending each message in its own tx."
             )
         for item in items:
