@@ -211,8 +211,11 @@ Same steps as the testnet run, with:
   beyond 1.3× ran out of gas (code 11). So, for each create, the connector adds that per-message gas once for every
   message of its own still waiting for a block on the same market (its tx was broadcast but is not found in a block
   yet). The scan param is read from the chain with the trading fees. Messages of other accounts in the same block
-  are not known in advance: the `gas_adjustment` slack covers about three of them for a single create. A create that
-  still runs out of gas fails like any other failed create tx.
+  are not known in advance: the `gas_adjustment` slack covers about three of them for a single create. Once a block
+  holds more than `orderBookExtraGasWindow` (100) queued tradebin messages, each further create also pays
+  `orderBookQueueExtraGas` (25,000) per message over that window, which the connector cannot foresee: on such a busy
+  block creates cost much more and may run out of gas. A create that runs out of gas fails like any other failed
+  create tx.
 - **Trading fees.** The tradebin maker/taker fees (flat amounts, in ubze on mainnet) are read from the chain params
   and added to every order's fee estimate, so PnL and profitability checks include them.
 - **Halted markets.** A market whose base or quote denom is halted by governance is exit-only: the connector refuses
