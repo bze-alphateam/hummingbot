@@ -12,7 +12,7 @@ from aioresponses import CallbackResult, aioresponses
 from yarl import URL
 
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
-from hummingbot.connector.exchange.beezee.beezee_exchange import BeezeeExchange
+from hummingbot.connector.exchange.beezee.beezee_exchange import BeezeeExchange, QueuedOrderMessage
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeConfigMap,
     BeezeeCustomNetworkMode,
@@ -261,6 +261,12 @@ class BeezeeOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
         order = self._order(client_order_id)
         return order.current_state if order is not None else None
 
+    def _assert_fills(self, expected: List[tuple]):
+        """(amount, price, flat fees) of every OrderFilled event, in order."""
+        self.assertEqual(expected, [
+            (fill.amount, fill.price, fill.trade_fee.flat_fees) for fill in self.events[MarketEvent.OrderFilled].event_log
+        ])
+
     def _event_ids(self, event: MarketEvent) -> List[str]:
         return [logged.order_id for logged in self.events[event].event_log]
 
@@ -270,10 +276,12 @@ class BeezeeOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
             states[CONSTANTS.TRACKING_STATE_KEY] = block_state
         self.exchange.restore_tracking_states(states)
 
-    def _resting_buy(self, client_order_id="OID-REST", exchange_order_id="000000000000000006810887") -> InFlightOrder:
+    def _resting_buy(
+        self, client_order_id="OID-REST", exchange_order_id="000000000000000006810887", amount: Decimal = Decimal("10")
+    ) -> InFlightOrder:
         return InFlightOrder(
             client_order_id=client_order_id, trading_pair="BZE-USDC", order_type=OrderType.LIMIT, trade_type=TradeType.BUY,
-            amount=Decimal("10"), price=Decimal("0.0003"), creation_timestamp=1.0, exchange_order_id=exchange_order_id,
+            amount=amount, price=Decimal("0.0003"), creation_timestamp=1.0, exchange_order_id=exchange_order_id,
             initial_state=OrderState.OPEN,
         )
 
@@ -325,6 +333,9 @@ class BeezeeOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([H, H + 1, H + 2, H + 3], self._requested_heights())
         self.assertTrue(self._logged(logging.INFO, f"processed at height {H + 3}"))
+        await self._run_until(lambda: self._state(order_id) == OrderState.OPEN, "the order is not open")
+        self.assertEqual(Decimal("0"), self._order(order_id).executed_amount_base)
+        self.assertEqual([], self._event_ids(MarketEvent.OrderFilled))
 
     async def test_partial_fill_then_rests(self):
         tx_hash = "11" * 32
@@ -469,6 +480,7 @@ class BeezeeOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
         await self._run_until(lambda: "OID-REST" in self._event_ids(MarketEvent.BuyOrderCompleted), "no maker fill")
 
         self.assertEqual([H, H + 1, H + 2, H + 3], self._requested_heights())
+        self._assert_fills([(Decimal("10"), Decimal("0.0003"), [TokenAmount("BZE", Decimal("0.001"))])])
 
     # --- cancel ---
 
@@ -510,6 +522,7 @@ class BeezeeOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
         await self._run_until(lambda: "OID-REST" in self._event_ids(MarketEvent.BuyOrderCompleted), "the order did not fill")
 
         self.assertEqual([], self._event_ids(MarketEvent.OrderCancelled))
+        self._assert_fills([(Decimal("10"), Decimal("0.0003"), [TokenAmount("BZE", Decimal("0.001"))])])
 
     # --- restart ---
 
@@ -737,3 +750,164 @@ class BeezeeOrderTrackingTests(unittest.IsolatedAsyncioTestCase):
         await self._run_until(lambda: "OID-REST" in self._event_ids(MarketEvent.OrderCancelled), "the order was not closed")
 
         self.assertEqual([], self._event_ids(MarketEvent.OrderFilled))
+
+    # --- mutation-check tests ---
+
+    def test_in_window_takes_a_message_only_at_its_next_height(self):
+        message = QueuedOrderMessage(client_order_id="OID", tx_hash=RESTED_TX, tx_height=H, next_height=H + 2)
+
+        self.assertFalse(message.in_window(H + 1))
+        self.assertTrue(message.in_window(H + 2))
+        self.assertFalse(message.in_window(H + 3))
+
+    async def test_fill_of_another_makers_order_with_the_same_id_is_ignored(self):
+        self._restore([self._resting_buy()], {"last_processed_height": H + 2, "creates": {}, "cancels": {}})
+        self._mock_latest_height(H + 3)
+        self._mock_user_orders(BZE_USDC, ["000000000000000006810887"], repeat=True)
+        self._mock_blocks({H + 3: block_results(H + 3, [
+            block_event("OrderExecutedEvent", id="000000000000000006810887", market_id=BZE_USDC, order_type="buy",
+                        amount="10000000", price="0.0003", maker=OTHER_ADDRESS, taker=OTHER_ADDRESS,
+                        message_id="000000000000000000000000"),
+        ])})
+
+        await self._status_update()
+        await self._drain()
+
+        self.assertEqual([H + 3], self._requested_heights())
+        self.assertEqual([], self._event_ids(MarketEvent.OrderFilled))
+        self.assertEqual(Decimal("0"), self._order("OID-REST").executed_amount_base)
+        self.assertEqual(OrderState.OPEN, self._state("OID-REST"))
+
+    async def test_reused_message_id_is_matched_to_the_latest_tx(self):
+        def queued(client_order_id: str, tx_hash: str, tx_height: int) -> Dict[str, Any]:
+            return {"client_order_id": client_order_id, "tx_hash": tx_hash, "msg_index": 0, "tx_height": tx_height,
+                    "message_id": "000000000000000000000000", "next_height": H + 3}
+
+        def sell(client_order_id: str, tx_hash: str) -> InFlightOrder:
+            return InFlightOrder(
+                client_order_id=client_order_id, trading_pair="BZE-USDC", order_type=OrderType.LIMIT,
+                trade_type=TradeType.SELL, amount=Decimal("1200"), price=Decimal("0.0005"), creation_timestamp=1.0,
+                exchange_order_id=tx_hash, initial_state=OrderState.OPEN,
+            )
+
+        later_tx = "55" * 32
+        self._restore([sell("OID-A", RESTED_TX), sell("OID-B", later_tx)], {"last_processed_height": H + 2, "cancels": {}, "creates": {
+            "OID-A": queued("OID-A", RESTED_TX, H), "OID-B": queued("OID-B", later_tx, H + 3),
+        }})
+        self._mock_latest_height(H + 3)
+        self._mock_blocks({H + 3: block_results(H + 3, recorded_events("block_results_25278996.json", "OrderSavedEvent"))})
+
+        await self._status_update()
+        await self._run_until(lambda: self._exchange_id("OID-B") == "000000000000000006810895", "B did not get the order")
+        await self._drain()
+
+        self.assertEqual(RESTED_TX, self._exchange_id("OID-A"))
+        self.assertEqual(OrderState.OPEN, self._state("OID-A"))
+        queued_creates = self.exchange.tracking_states[CONSTANTS.TRACKING_STATE_KEY]["creates"]
+        self.assertEqual(["OID-A"], list(queued_creates))
+        self.assertEqual(H + 4, queued_creates["OID-A"]["next_height"])
+
+    async def _skip_block_with_pruned_state(self, amount: Decimal, latest_order_amount: Optional[str]):
+        """Block H+2 cannot be read and the state at H+2 is gone too, so the resting order is reconciled at H+3,
+        the block holding its real 10 BZE maker fill."""
+        self._restore([self._resting_buy(amount=amount)], {"last_processed_height": H + 1, "creates": {}, "cancels": {}})
+        self._mock_latest_height(H + 3, repeat=True)
+        for _ in range(CONSTANTS.MAX_BLOCK_READ_ATTEMPTS):
+            self.mock_api.get(self._block_url(H + 2), status=500, body="block results pruned")
+        self.mock_api.get(self._block_url(H + 3), payload=load_fixture("block_results_25278999.json"))
+        url = re.compile(rf"^{re.escape(REST_URL + CONSTANTS.MARKET_ORDER_PATH_URL)}\?.*$")
+
+        def market_order_at(url, headers=None, **kwargs):
+            if (headers or {}).get("x-cosmos-block-height") == str(H + 2):
+                return CallbackResult(status=500, body="state pruned")
+            if latest_order_amount is None:
+                return CallbackResult(status=404, payload={"code": 5, "message": "not found", "details": []})
+            return CallbackResult(payload={"order": {"id": "000000000000000006810887", "amount": latest_order_amount, "price": "0.0003"}})
+
+        self.mock_api.get(url, repeat=True, callback=market_order_at)
+        self._mock_user_orders(BZE_USDC, ["000000000000000006810887"] if latest_order_amount else [], repeat=True)
+        for _ in range(CONSTANTS.MAX_BLOCK_READ_ATTEMPTS):
+            await self._status_update()
+        await self._drain()
+
+    async def test_fills_reconciled_at_the_latest_height_are_not_counted_again(self):
+        await self._skip_block_with_pruned_state(Decimal("20"), latest_order_amount="10000000")
+
+        self.assertEqual([str(H + 2), str(H + 3)], self._market_order_heights())
+        self.assertEqual([f"reconcile-{H + 3}"], [fill.exchange_trade_id for fill in self.events[MarketEvent.OrderFilled].event_log])
+        self.assertEqual(Decimal("10"), self._order("OID-REST").executed_amount_base)
+        self.assertEqual(OrderState.PARTIALLY_FILLED, self._state("OID-REST"))
+
+    async def test_order_gone_at_the_fallback_height_keeps_its_block_fills(self):
+        await self._skip_block_with_pruned_state(Decimal("10"), latest_order_amount=None)
+        await self._run_until(lambda: "OID-REST" in self._event_ids(MarketEvent.BuyOrderCompleted), "the block fill was dropped")
+
+        self.assertEqual([f"{H + 3}-1-maker"], [fill.exchange_trade_id for fill in self.events[MarketEvent.OrderFilled].event_log])
+        self.assertEqual([], self._event_ids(MarketEvent.OrderCancelled))
+
+    async def test_cancel_tx_is_matched_by_its_order_id(self):
+        batch = [  # (exchange id, amount, price) of the batch's cancelled orders, in cancel message order
+            ("000000000000000006810894", "0.803126", "229"), ("000000000000000006810893", "0.819926", "226"),
+            ("000000000000000006810892", "0.999034", "223"), ("000000000000000006810891", "0.215644", "220"),
+        ]
+        orders = [
+            InFlightOrder(
+                client_order_id=f"OID-{index}", trading_pair="TKN-BZE", order_type=OrderType.LIMIT, trade_type=TradeType.SELL,
+                amount=Decimal(amount), price=Decimal(price), creation_timestamp=1.0, exchange_order_id=order_id,
+                initial_state=OrderState.OPEN,
+            )
+            for index, (order_id, amount, price) in enumerate(batch)
+        ]
+        self._restore(orders, {"last_processed_height": H + 3, "creates": {}, "cancels": {}})
+        self._mock_latest_height(H + 3)
+        self._mock_user_orders(TKN_BZE, [order_id for order_id, _, _ in batch], repeat=True)
+        await self._status_update()
+        await self._run_until(lambda: all(self._state(order.client_order_id) == OrderState.OPEN for order in orders), "not open")
+        self._mock_broadcast(CANCEL_BATCH_TX)
+        self._mock_tx(CANCEL_BATCH_TX, load_fixture("tx_cancel_batch_25279000.json"))
+        self._mock_latest_height(H + 4)
+        self._mock_blocks({H + 4: load_fixture("block_results_25279000.json")})
+
+        self.exchange.cancel("TKN-BZE", "OID-3")
+        await self._run_until(lambda: "OID-3" in self._event_ids(MarketEvent.OrderCancelled), "the cancel was not confirmed")
+        await self._drain()
+
+        self.assertEqual(["OID-3"], self._event_ids(MarketEvent.OrderCancelled))
+        self.assertEqual([OrderState.OPEN] * 3, [self._state(f"OID-{index}") for index in range(3)])
+
+    async def test_canceled_event_of_another_order_does_not_confirm_a_cancel(self):
+        order_x = self._resting_buy("OID-X", "000000000000000006810887")
+        order_y = self._resting_buy("OID-Y", "000000000000000006810888")
+        self._restore([order_x, order_y], {"last_processed_height": H + 2, "creates": {}, "cancels": {}})
+        self._mock_latest_height(H + 2)
+        self._mock_user_orders(BZE_USDC, ["000000000000000006810887", "000000000000000006810888"], repeat=True)
+        await self._status_update()
+        cancel_tx, message_id = "66" * 32, "000000000000000000000002"
+        self._mock_broadcast(cancel_tx)
+        self._mock_tx(cancel_tx, tx(cancel_tx, H + 3, [tx_event(
+            "OrderCancelMessageEvent", creator=ADDRESS, marketId=BZE_USDC, orderId="000000000000000006810887",
+            order_type="buy", message_id=message_id,
+        )]))
+        self._mock_latest_height(H + 3)
+
+        def canceled(order_id: str) -> Dict[str, Any]:
+            return block_event("OrderCanceledEvent", id=order_id, market_id=BZE_USDC, order_type="buy", amount="10000000",
+                               price="0.0003", owner=ADDRESS, message_id=message_id)
+
+        self._mock_blocks({H + 3: block_results(H + 3, [canceled("000000000000000006810888")])})
+
+        self.exchange.cancel("BZE-USDC", "OID-X")
+        await self._run_until(lambda: self._requested_heights() == [H + 3], "block H+3 was not read")
+        await self._drain()
+
+        self.assertEqual([], self._event_ids(MarketEvent.OrderCancelled))
+        self.assertEqual(OrderState.PENDING_CANCEL, self._state("OID-X"))
+        self.assertEqual(OrderState.OPEN, self._state("OID-Y"))
+
+        self._mock_latest_height(H + 4)
+        self._mock_blocks({H + 4: block_results(H + 4, [canceled("000000000000000006810887")])})
+        await self._status_update()
+        await self._run_until(lambda: "OID-X" in self._event_ids(MarketEvent.OrderCancelled), "X was not cancelled")
+
+        self.assertEqual(["OID-X"], self._event_ids(MarketEvent.OrderCancelled))
+        self.assertEqual(OrderState.OPEN, self._state("OID-Y"))

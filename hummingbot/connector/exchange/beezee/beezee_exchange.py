@@ -1020,15 +1020,16 @@ class BeezeeExchange(ExchangePyBase):
                 chain_order = await data_source.get_market_order(
                     market.market_id, side, order.exchange_order_id, height=fallback_height
                 )
-            self._fills_counted_through[order.client_order_id] = read_height
             self._orders_to_verify.add(order.client_order_id)
             if chain_order is None:
+                # No fill comes from the chain state, so block fills still read after this point keep counting.
                 if order.executed_amount_base < order.amount:
                     self.logger().warning(
                         f"Beezee order {order.client_order_id} left the book while its fills were not read. "
                         f"Its fills are unknown, so it is closed as cancelled without a fill."
                     )
                 continue
+            self._fills_counted_through[order.client_order_id] = read_height
             missed_fill = order.amount - chain_amount_to_display(chain_order["amount"], market.base) - order.executed_amount_base
             if missed_fill <= Decimal("0"):
                 continue
