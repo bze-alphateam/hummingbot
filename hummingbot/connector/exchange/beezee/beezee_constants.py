@@ -76,6 +76,10 @@ DEFAULT_BLOCK_STREAM_TIMEOUT = 20.0
 # Mainnet public-node minimum gas price (ubze per gas unit) on chain v8.2.0.
 DEFAULT_GAS_PRICE = Decimal("0.01")
 DEFAULT_GAS_ADJUSTMENT = Decimal("1.3")
+# Creates and cancels arriving within the window share one tx, at most this many messages per tx.
+DEFAULT_BATCH_WINDOW_MS = 300
+DEFAULT_MAX_MESSAGES_PER_TX = 25
+BATCH_MEMO = "hbot-batch"
 # Legacy fixed gas limits, replaced by tx simulation. Still accepted (and ignored) in saved configs.
 LEGACY_GAS_LIMIT_CONFIG_KEYS = ("create_order_gas_limit", "cancel_order_gas_limit")
 

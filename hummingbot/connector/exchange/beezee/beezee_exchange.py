@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
@@ -16,6 +17,7 @@ from hummingbot.connector.exchange.beezee.beezee_api_order_book_data_source impo
 from hummingbot.connector.exchange.beezee.beezee_api_user_stream_data_source import BeezeeAPIUserStreamDataSource
 from hummingbot.connector.exchange.beezee.beezee_auth import BeezeeAuth
 from hummingbot.connector.exchange.beezee.beezee_events import TradebinEvent, block_tradebin_events, tx_tradebin_events
+from hummingbot.connector.exchange.beezee.beezee_order_batcher import BatchedOrderMessage, BeezeeOrderBatcher
 from hummingbot.connector.exchange.beezee.beezee_signer import BeezeeSigner
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeConfigMap,
@@ -31,6 +33,7 @@ from hummingbot.connector.exchange_py_base import ExchangePyBase
 from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.core.data_type.common import OrderType, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState, OrderUpdate, TradeUpdate
+from hummingbot.core.data_type.limit_order import LimitOrder
 from hummingbot.core.data_type.order_book_tracker_data_source import OrderBookTrackerDataSource
 from hummingbot.core.data_type.trade_fee import AddedToCostTradeFee, TokenAmount, TradeFeeBase
 from hummingbot.core.data_type.user_stream_tracker_data_source import UserStreamTrackerDataSource
@@ -142,6 +145,14 @@ class BeezeeExchange(ExchangePyBase):
         self._fills_counted_through: Dict[str, int] = {}
         self._block_read_failures: Dict[int, int] = {}
         self._last_status_log_timestamp = 0.0
+        # The messages of one batch tx share one tx lookup.
+        self._tx_fetch_tasks: Dict[str, asyncio.Task] = {}
+        self._order_batcher = BeezeeOrderBatcher(
+            send=self._send_order_batch,
+            sleep=lambda delay: self._sleep(delay),
+            window_s=connector_configuration.batch_window_ms / 1000,
+            max_messages=connector_configuration.max_messages_per_tx,
+        )
 
         super().__init__(balance_asset_limit=balance_asset_limit, rate_limits_share_pct=rate_limits_share_pct)
 
@@ -297,25 +308,14 @@ class BeezeeExchange(ExchangePyBase):
         if amount < minimum_amount:
             raise ValueError(f"Beezee minimum size at price {price} is {minimum_amount} {market.base.symbol}.")
         side = CONSTANTS.SIDE_BUY if trade_type is TradeType.BUY else CONSTANTS.SIDE_SELL
-        try:
-            response = await data_source.broadcast_create_order(
-                market=market,
-                order_type=side,
-                amount=amount,
-                price=price,
-                memo=f"hbot:{order_id}",
-            )
-        except BeezeeTxRefusedError as error:
-            if error.is_denom_halted:
-                await self._mark_market_halted_by_chain(market)
-            raise IOError(f"Beezee order create failed: {error.chain_message}") from error
-        tx_hash = response["tx_response"]["txhash"]
         # The tx hash stays the order's exchange id until the chain saves the order and gives it an id.
-        self._queue_message(QueuedOrderMessage(client_order_id=order_id, tx_hash=tx_hash, msg_index=0), is_cancel=False)
-        self.logger().info(
-            f"Beezee create order transaction submitted. client_order_id={order_id}, "
-            f"market={market.market_id}, side={side}, tx_hash={tx_hash}"
-        )
+        tx_hash = await self._order_batcher.submit(BatchedOrderMessage(
+            client_order_id=order_id,
+            is_cancel=False,
+            message=data_source.create_order_message(market=market, order_type=side, amount=amount, price=price),
+            market=market,
+            memo=f"hbot:{order_id}",
+        ))
         return tx_hash, self.current_timestamp
 
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
@@ -331,26 +331,142 @@ class BeezeeExchange(ExchangePyBase):
             return False
         if order_id in self._queued_cancels:
             return True
-
-        try:
-            response = await data_source.broadcast_cancel_order(
-                market_id=market.market_id,
-                order_type=CONSTANTS.SIDE_BUY if tracked_order.trade_type is TradeType.BUY else CONSTANTS.SIDE_SELL,
-                order_id=exchange_order_id,
-                memo=f"hbot-cancel:{order_id}",
-            )
-        except BeezeeTxRefusedError as error:
-            raise IOError(f"Beezee cancel failed: {error.chain_message}") from error
-        tx_hash = response["tx_response"]["txhash"]
-        self._queue_message(
-            QueuedOrderMessage(client_order_id=order_id, tx_hash=tx_hash, order_id=exchange_order_id),
+        await self._order_batcher.submit(BatchedOrderMessage(
+            client_order_id=order_id,
             is_cancel=True,
-        )
-        self.logger().info(
-            f"Beezee cancel order transaction submitted. client_order_id={order_id}, "
-            f"exchange_order_id={exchange_order_id}, tx_hash={tx_hash}"
-        )
+            message=data_source.cancel_order_message(
+                market_id=market.market_id, order_type=self._side(tracked_order.trade_type), order_id=exchange_order_id
+            ),
+            market=market,
+            memo=f"hbot-cancel:{order_id}",
+        ))
         return True
+
+    # === Batched txs ===
+    #
+    # Creates and cancels are coalesced by the order batcher: everything submitted within `batch_window_ms` goes into
+    # one tx (cancels first, at most `max_messages_per_tx` messages), simulated, signed and broadcast once. The i-th
+    # create message of a tx is resolved by the tx's i-th OrderCreateMessageEvent, a cancel by its order id.
+
+    def batch_order_create(self, orders_to_create: List[LimitOrder]) -> List[LimitOrder]:
+        created = super().batch_order_create(orders_to_create)
+        # The create tasks have not run yet: their tx goes out once they have all been submitted.
+        self._order_batcher.expect(order.client_order_id for order in created)
+        return created
+
+    def batch_order_cancel(self, orders_to_cancel: List[LimitOrder]):
+        super().batch_order_cancel(orders_to_cancel)
+        self._order_batcher.expect(
+            order.client_order_id for order in orders_to_cancel if order.client_order_id in self.in_flight_orders
+        )
+
+    async def _create_order(self, trade_type: TradeType, order_id: str, *args, **kwargs):
+        try:
+            await super()._create_order(trade_type, order_id, *args, **kwargs)
+        finally:
+            self._order_batcher.settle(order_id)
+
+    async def _execute_cancel(self, trading_pair: str, order_id: str) -> str:
+        try:
+            return await super()._execute_cancel(trading_pair, order_id)
+        finally:
+            self._order_batcher.settle(order_id)
+
+    async def _send_order_batch(self, items: List[BatchedOrderMessage]):
+        """Sends a batch in one tx. A simulation refusal of a batch is caused by one of its messages, so: a halted
+        market's creates are dropped and the rest is tried once more, and otherwise every message is sent alone."""
+        try:
+            await self._broadcast_batch(items)
+            return
+        except BeezeeTxRefusedError as error:
+            refusal = error
+            if not self._is_message_refusal(refusal, items):
+                await self._reject_batch(items, refusal)
+                return
+            remaining = await self._drop_halted_creates(items, refusal) if refusal.is_denom_halted else items
+            if not remaining:
+                return
+            if len(remaining) < len(items):
+                items = remaining
+                try:
+                    await self._broadcast_batch(items)
+                    return
+                except BeezeeTxRefusedError as retry_error:
+                    refusal = retry_error
+                    if not self._is_message_refusal(refusal, items):
+                        await self._reject_batch(items, refusal)
+                        return
+            self.logger().warning(
+                f"Beezee batch of {len(items)} messages was refused in simulation ({refusal.chain_message}). "
+                f"Sending each message in its own tx."
+            )
+        for item in items:
+            try:
+                await self._broadcast_batch([item])
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self._reject_batch([item], error)
+
+    @staticmethod
+    def _is_message_refusal(error: BeezeeTxRefusedError, items: List[BatchedOrderMessage]) -> bool:
+        # Simulation runs the messages; a broadcast refusal or a sequence mismatch is about the tx itself.
+        return len(items) > 1 and error.stage == "simulation" and not error.is_sequence_mismatch
+
+    async def _broadcast_batch(self, items: List[BatchedOrderMessage]):
+        memo = items[0].memo if len(items) == 1 else CONSTANTS.BATCH_MEMO
+        response = await self._build_data_source().simulate_sign_and_broadcast([item.message for item in items], memo=memo)
+        tx_hash = response["tx_response"]["txhash"]
+        create_index = 0
+        for item in items:
+            if item.is_cancel:
+                order = self._order_tracker.fetch_tracked_order(item.client_order_id)
+                exchange_order_id = order.exchange_order_id if order is not None else None
+                message = QueuedOrderMessage(client_order_id=item.client_order_id, tx_hash=tx_hash, order_id=exchange_order_id)
+                self.logger().info(
+                    f"Beezee cancel order transaction submitted. client_order_id={item.client_order_id}, "
+                    f"exchange_order_id={exchange_order_id}, tx_hash={tx_hash}"
+                )
+            else:
+                message = QueuedOrderMessage(client_order_id=item.client_order_id, tx_hash=tx_hash, msg_index=create_index)
+                create_index += 1
+                self.logger().info(
+                    f"Beezee create order transaction submitted. client_order_id={item.client_order_id}, "
+                    f"market={item.market.market_id}, tx_hash={tx_hash}, msg_index={message.msg_index}"
+                )
+            self._queue_message(message, is_cancel=item.is_cancel)
+            item.resolve(tx_hash)
+        if len(items) > 1:
+            self.logger().info(f"Beezee batch tx {tx_hash} submitted with {len(items)} messages.")
+
+    async def _drop_halted_creates(
+        self, items: List[BatchedOrderMessage], error: BeezeeTxRefusedError
+    ) -> List[BatchedOrderMessage]:
+        """Rejects the creates on the halted market the refusal names (and on any other market now known halted) and
+        returns the rest. When the refusal names no known market, nothing is dropped."""
+        named = re.search(r"market (\S+) is halted", error.chain_message)
+        market = next((item.market for item in items if named and item.market.market_id == named.group(1)), None)
+        if market is None:
+            return items
+        await self._mark_market_halted_by_chain(market)
+        dropped = [item for item in items if not item.is_cancel and self._halt_reason(item.market) is not None]
+        for item in dropped:
+            item.reject(IOError(f"Beezee order create failed: {error.chain_message}"))
+        return [item for item in items if item not in dropped]
+
+    async def _reject_batch(self, items: List[BatchedOrderMessage], error: Exception):
+        if isinstance(error, BeezeeTxRefusedError):
+            halted_markets = {item.market.market_id: item.market for item in items if not item.is_cancel}
+            if error.is_denom_halted and len(halted_markets) == 1:
+                await self._mark_market_halted_by_chain(next(iter(halted_markets.values())))
+            message = error.chain_message
+        else:
+            message = str(error)
+        for item in items:
+            kind = "cancel" if item.is_cancel else "order create"
+            rejection = IOError(f"Beezee {kind} failed: {message}")
+            rejection.__cause__ = error
+            item.reject(rejection)
 
     async def _format_trading_rules(self, exchange_info_dict: Dict[str, Any]) -> List[TradingRule]:
         data_source = self._build_data_source()
@@ -378,10 +494,13 @@ class BeezeeExchange(ExchangePyBase):
     async def stop_network(self):
         await super().stop_network()
         # Tx lookups and halt cancels are restarted from the saved state by the next status update.
-        for task in list(self._tx_lookup_tasks.values()) + list(self._halt_cancel_tasks.values()):
+        self._order_batcher.stop()
+        tasks = list(self._tx_lookup_tasks.values()) + list(self._halt_cancel_tasks.values())
+        for task in tasks + list(self._tx_fetch_tasks.values()):
             task.cancel()
         self._tx_lookup_tasks.clear()
         self._halt_cancel_tasks.clear()
+        self._tx_fetch_tasks.clear()
 
     async def _status_polling_loop_fetch_updates(self):
         await super()._status_polling_loop_fetch_updates()
@@ -552,14 +671,13 @@ class BeezeeExchange(ExchangePyBase):
             self._tx_lookup_tasks[key] = safe_ensure_future(self._look_up_tx(message, is_cancel))
 
     async def _look_up_tx(self, message: QueuedOrderMessage, is_cancel: bool):
-        data_source = self._build_data_source()
         try:
             for delay in CONSTANTS.TX_LOOKUP_DELAYS:
                 await self._sleep(delay)
                 if self._queued_messages(is_cancel).get(message.client_order_id) is not message:
                     return
                 # None only when the node answers "not found": a failed request raises and is retried later.
-                tx = await data_source.get_tx(message.tx_hash)
+                tx = await self._fetch_tx(message.tx_hash)
                 tx_response = (tx or {}).get("tx_response")
                 if tx_response:
                     await self._on_tx_found(message, is_cancel, tx_response)
@@ -572,6 +690,22 @@ class BeezeeExchange(ExchangePyBase):
                 f"Failed to follow Beezee tx {message.tx_hash} (client_order_id={message.client_order_id}). "
                 f"Retrying on the next status update. Error: {error}"
             )
+
+    async def _fetch_tx(self, tx_hash: str) -> Optional[Dict[str, Any]]:
+        # The lookups of a batch's messages run in step, so they share the request in flight for their tx.
+        task = self._tx_fetch_tasks.get(tx_hash)
+        if task is None:
+            # Its error goes to the lookups awaiting it, which log and retry it.
+            task = asyncio.ensure_future(self._build_data_source().get_tx(tx_hash))
+            self._tx_fetch_tasks[tx_hash] = task
+            task.add_done_callback(lambda done: self._forget_tx_fetch(tx_hash, done))
+        return await asyncio.shield(task)
+
+    def _forget_tx_fetch(self, tx_hash: str, task: asyncio.Task):
+        if self._tx_fetch_tasks.get(tx_hash) is task:
+            del self._tx_fetch_tasks[tx_hash]
+        if not task.cancelled():
+            task.exception()  # retrieved here too, for when every lookup awaiting it was cancelled
 
     async def _on_tx_not_found(self, message: QueuedOrderMessage, is_cancel: bool):
         waited = int(sum(CONSTANTS.TX_LOOKUP_DELAYS))
