@@ -90,14 +90,20 @@ than `ceil(1 / price) × 2` base units, with the price in quote base units per b
 against the lowest bid level. A test loads every `*.yml.example` through the client's `import` path, so a misspelled
 key or an invalid value fails CI.
 
+A refresh cancels the old levels in one batch tx and, once the chain has confirmed those cancels, places the new ones
+in the next (`should_wait_order_cancel_confirmation: true`, upstream's default). With `false`, the cancels and the
+creates share one tx, but the wallet then needs enough free balance for both sets of levels, since the chain only
+releases a cancelled order's funds at the end of the block.
+
 The pair names are what the connector lists: it names a token after its on-chain denom metadata. On mainnet that
 metadata gives USDC.inj the symbol `ERC20:0XA00C…` and no display unit, so the bot counts USDC in base units
 (1 = 0.000001 USDC) and shows the BZE price as about 333 instead of 0.000333. Orders are still priced right on chain.
 USDC.n lists as `BZE-UUSDC`. To see every pair the connector knows, run `create`, pick `pure_market_making` and
 `beezee`, and look at the trading pair autocomplete.
 
-**The book needs a price.** Hummingbot reads the mid price from the book and does not start quoting on an empty or
-one-sided book. Before the first `start`, make sure the market has at least one bid and one ask: place them from a
+### Seeding the book
+
+Hummingbot reads the mid price from the book and does not start quoting on an empty or one-sided book. Before the first `start`, make sure the market has at least one bid and one ask: place them from a
 second wallet in the dex app (testnet: testnet-dex.getbze.com, mainnet: dex.getbze.com), or let the
 [tradebin-mm](https://github.com/faneaatiku/tradebin-mm) stopgap bot quote the market. Prices anchored to the
 liquidity pool come later.
@@ -146,8 +152,8 @@ Network facts (October 2026, chain v8.2.0):
    --keyring-backend test`, and keep the printed mnemonic. Send it some testnet BZE from a test wallet you already
    have (it pays the gas and the tradebin fees). In testnet-dex.getbze.com, swap part of it for ULMN and for TUSDC in
    their pools: a few thousand ULMN and a few TUSDC are plenty for the example config.
-2. **Seed the book** if it lacks a bid or an ask (see above). A second testnet wallet is also what you use to fill the
-   bot's orders by hand.
+2. **Seed the book** if it lacks a bid or an ask (see "Seeding the book"). A second testnet wallet is also what you
+   use to fill the bot's orders by hand.
 3. **Connect.** In the client run `connect beezee` and answer:
    - network: `testnet`; REST `https://testnet.getbze.com`; RPC `https://testnet-rpc.getbze.com`; websocket: leave
      empty (derived from the RPC); chain id `bzetestnet-3`; prefix `bze`; native denom `ubze`;
@@ -168,8 +174,9 @@ Network facts (October 2026, chain v8.2.0):
 6. **Watch.** `status` shows the levels, balances and open orders; `history` the fills with their fees. The log
    (`hb/logs/`) shows each `Beezee batch tx … submitted with N messages` and each order's
    `processed at height … exchange_order_id=…`.
-7. **Stop.** `stop` cancels every open order of the strategy, batched into as few txs as `max_messages_per_tx` allows. Afterwards open testnet-dex.getbze.com with
-   the bot's address and check that no order of it is left on the book; cancel any leftover there.
+7. **Stop.** `stop` cancels every open order of the strategy, batched into as few txs as `max_messages_per_tx`
+   allows. Afterwards open testnet-dex.getbze.com with the bot's address and check that no order of it is left on
+   the book; cancel any leftover there.
 
 ## Mainnet run
 
@@ -183,7 +190,7 @@ Same steps as the testnet run, with:
   order pays the tradebin fee when it is created (mainnet: 0.1 BZE taker, 0.001 BZE maker).
 - `cp conf/strategies/beezee_pmm_bze_usdc.yml.example hb/conf/strategies/beezee_pmm_bze_usdc.yml`, set `order_amount`,
   then `import beezee_pmm_bze_usdc.yml` and `start`.
-- The book must have a bid and an ask (see above). Cancel-all check after `stop` in dex.getbze.com.
+- The book must have a bid and an ask (see "Seeding the book"). Cancel-all check after `stop` in dex.getbze.com.
 
 ## Connector behaviour on chain v8.2.0
 
