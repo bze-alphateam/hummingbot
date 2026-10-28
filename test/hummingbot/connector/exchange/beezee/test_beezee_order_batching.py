@@ -629,6 +629,33 @@ class BeezeeOrderBatchingTests(BeezeeBatchingTestCase):
             "not cancelled",
         )
 
+    async def test_cancel_that_got_its_id_while_waiting_is_sent_once_even_if_a_poll_runs_mid_send(self):
+        self.node.check_tx_gate = asyncio.get_event_loop().create_future()
+        created = self.exchange.batch_order_create(self._ladder(1))
+        await self._run_until(lambda: len(self.node.broadcast) == 1, "the batch was not broadcast")
+        self.exchange.cancel("BZE-USDC", created[0].client_order_id)
+        await self._run_until(lambda: self.id_waits, "the cancel did not wait for the order id")
+        self.node.check_tx_gate.set_result(None)
+        await self._run_until(lambda: self.windows and not self.windows[-1].done(), "the cancel was not queued")
+
+        # The cancel's own tx is being broadcast when the next status poll runs.
+        self.node.check_tx_gate = asyncio.get_event_loop().create_future()
+        self.windows[-1].set_result(None)
+        await self._run_until(lambda: len(self.node.broadcast) == 2, "the cancel was not broadcast")
+        await self._status_update()
+        await self._settle()
+        self.node.check_tx_gate.set_result(None)
+        self.node.check_tx_gate = None
+        for _ in range(3):
+            await self._settle()
+            for window in self.windows:
+                if not window.done():
+                    window.set_result(None)
+
+        cancels = [m.order_id for sent in self.node.broadcast for m in sent.messages if m.kind == "cancel"]
+        self.assertEqual([f"{6820000:024d}"], cancels)
+        await self._run_until(lambda: created[0].client_order_id in self._event_ids(MarketEvent.OrderCancelled), "not cancelled")
+
     async def test_cancel_of_an_order_whose_broadcast_is_refused_ends_without_waiting_out_its_timeout(self):
         self.node.check_tx_gate = asyncio.get_event_loop().create_future()
         self.node.check_tx_answers = [(13, "insufficient fee")]

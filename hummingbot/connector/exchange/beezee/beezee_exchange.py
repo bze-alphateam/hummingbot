@@ -152,6 +152,7 @@ class BeezeeExchange(ExchangePyBase):
         # Orders asked to cancel while their create tx was on its way: cancelled once the chain gives them an id.
         self._cancel_requested: Set[str] = set()
         self._deferred_cancel_tasks: Dict[str, asyncio.Task] = {}
+        self._cancels_in_progress: Dict[str, int] = defaultdict(int)
         # Set on every order state update, for cancels waiting for their order's chain id.
         self._order_progress = asyncio.Event()
         # The messages of one batch tx share one tx lookup.
@@ -330,6 +331,16 @@ class BeezeeExchange(ExchangePyBase):
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required for cancels.")
+        # While a call waits for the order id or sends the cancel, the deferred-cancel retry leaves the order alone.
+        self._cancels_in_progress[order_id] += 1
+        try:
+            return await self._send_cancel(order_id, tracked_order)
+        finally:
+            self._cancels_in_progress[order_id] -= 1
+            if not self._cancels_in_progress[order_id]:
+                del self._cancels_in_progress[order_id]
+
+    async def _send_cancel(self, order_id: str, tracked_order: InFlightOrder) -> bool:
         data_source = self._build_data_source()
         market = await data_source.get_market_by_trading_pair(tracked_order.trading_pair)
         if self._order_batcher.withdraw_create(order_id):
@@ -444,7 +455,7 @@ class BeezeeExchange(ExchangePyBase):
             if order is None or order.is_done or client_order_id in self._queued_cancels:
                 self._cancel_requested.discard(client_order_id)
                 continue
-            if len(order.exchange_order_id or "") != CONSTANTS.ORDER_ID_LENGTH:
+            if len(order.exchange_order_id or "") != CONSTANTS.ORDER_ID_LENGTH or self._cancels_in_progress.get(client_order_id):
                 continue
             running = self._deferred_cancel_tasks.get(client_order_id)
             if running is None or running.done():
