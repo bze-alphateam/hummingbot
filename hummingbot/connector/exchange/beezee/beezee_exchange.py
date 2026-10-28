@@ -415,7 +415,9 @@ class BeezeeExchange(ExchangePyBase):
 
     async def _broadcast_batch(self, items: List[BatchedOrderMessage]):
         memo = items[0].memo if len(items) == 1 else CONSTANTS.BATCH_MEMO
-        response = await self._build_data_source().simulate_sign_and_broadcast([item.message for item in items], memo=memo)
+        response = await self._build_data_source().simulate_sign_and_broadcast(
+            [item.message for item in items], memo=memo, extra_gas=self._queued_ahead_gas(items)
+        )
         tx_hash = response["tx_response"]["txhash"]
         create_index = 0
         for item in items:
@@ -438,6 +440,22 @@ class BeezeeExchange(ExchangePyBase):
             item.resolve(tx_hash)
         if len(items) > 1:
             self.logger().info(f"Beezee batch tx {tx_hash} submitted with {len(items)} messages.")
+
+    def _queued_ahead_gas(self, items: List[BatchedOrderMessage]) -> int:
+        """Gas for the messages this account queued whose tx is not in a block yet: they may land in the same block
+        ahead of this tx, and each create pays for every message queued before it on its market. The simulation
+        cannot see them (it runs on the last committed state), and messages of the same tx it already counts."""
+        queued_ahead: Dict[str, int] = {}
+        for message in list(self._queued_creates.values()) + list(self._queued_cancels.values()):
+            order = self._order_tracker.fetch_tracked_order(message.client_order_id)
+            if message.tx_height is None and order is not None:
+                queued_ahead[order.trading_pair] = queued_ahead.get(order.trading_pair, 0) + 1
+        data_source = self._build_data_source()
+        return sum(
+            queued_ahead[item.market.trading_pair] * data_source.queued_message_gas(item.market.market_id)
+            for item in items
+            if not item.is_cancel and item.market.trading_pair in queued_ahead
+        )
 
     async def _drop_halted_creates(
         self, items: List[BatchedOrderMessage], error: BeezeeTxRefusedError

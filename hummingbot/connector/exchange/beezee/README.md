@@ -168,7 +168,11 @@ Notes:
 ## Gas and fees
 
 - Before every broadcast the connector simulates the tx (`/cosmos/tx/v1beta1/simulate`). The gas limit is
-  `ceil(gas_used * gas_adjustment)` and the fee is `ceil(gas_limit * gas_price)` in the native denom.
+  `ceil(gas_used * gas_adjustment)` plus a queue extra, and the fee is `ceil(gas_limit * gas_price)` in the native
+  denom.
+- Queue extra: in a block, each create pays tradebin's `orderBookQueueMessageScanExtraGas` (5000) plus store reads for
+  every message queued before it on its market. The simulation runs on committed state and cannot see them, so each
+  create gets that gas added once per message of this account on the same market whose tx is not in a block yet.
 - A tx whose simulation fails is never broadcast; the order fails with the chain's message. An account sequence
   mismatch resets the cached sequence and retries once. Txs are sent one at a time from sequence reservation to
   broadcast, so orders placed together (a bid and an ask) get consecutive sequences.

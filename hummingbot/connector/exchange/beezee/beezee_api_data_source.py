@@ -114,6 +114,7 @@ class BeezeeAPIDataSource:
         self._tx_lock = asyncio.Lock()
         self._cached_account_number: Optional[int] = None
         self._next_account_sequence: Optional[int] = None
+        self._queue_message_scan_gas = CONSTANTS.DEFAULT_QUEUE_MESSAGE_SCAN_GAS
 
     @classmethod
     def logger(cls):
@@ -175,7 +176,24 @@ class BeezeeAPIDataSource:
         return items
 
     async def get_tradebin_params(self) -> Dict[str, Any]:
-        return (await self._request(CONSTANTS.TRADEBIN_PARAMS_PATH_URL)).get("params", {})
+        params = (await self._request(CONSTANTS.TRADEBIN_PARAMS_PATH_URL)).get("params", {})
+        raw_scan_gas = next(
+            (params[key] for key in ("orderBookQueueMessageScanExtraGas", "order_book_queue_message_scan_extra_gas") if key in params),
+            None,
+        )
+        try:
+            self._queue_message_scan_gas = int(raw_scan_gas) if raw_scan_gas is not None else CONSTANTS.DEFAULT_QUEUE_MESSAGE_SCAN_GAS
+        except (TypeError, ValueError):
+            self._queue_message_scan_gas = CONSTANTS.DEFAULT_QUEUE_MESSAGE_SCAN_GAS
+        return params
+
+    def queued_message_gas(self, market_id: str) -> int:
+        """Extra gas a create on `market_id` pays for each message queued on that market before it in the same block.
+
+        The scan gas comes from the tradebin params of the last `get_tradebin_params` call (the chain default before).
+        """
+        message_bytes = 2 * len(market_id) + CONSTANTS.QUEUE_MESSAGE_FIXED_BYTES
+        return self._queue_message_scan_gas + CONSTANTS.KV_ITER_NEXT_COST_FLAT + CONSTANTS.KV_READ_COST_PER_BYTE * message_bytes
 
     async def get_trade_fees(self) -> Dict[str, Optional[TokenAmount]]:
         """Returns the tradebin maker and taker fees as flat token amounts in display units.
@@ -382,10 +400,11 @@ class BeezeeAPIDataSource:
             raise BeezeeTxRefusedError("simulation", str(response.get("message") or response))
         return int(gas_used)
 
-    async def simulate_sign_and_broadcast(self, messages: List[bytes], memo: str = "") -> Dict[str, Any]:
+    async def simulate_sign_and_broadcast(self, messages: List[bytes], memo: str = "", extra_gas: int = 0) -> Dict[str, Any]:
         """Simulates the messages for gas, then signs and broadcasts them in a single tx.
 
-        gas limit = ceil(gas_used * gas_adjustment), fee = ceil(gas limit * gas_price) in the native denom.
+        gas limit = ceil(gas_used * gas_adjustment) + extra_gas, fee = ceil(gas limit * gas_price) in the native denom.
+        `extra_gas` covers what the simulation cannot see, e.g. messages queued earlier in the same block.
         A refused simulation is never broadcast. An account sequence mismatch, in simulation or at broadcast,
         resets the cached sequence and retries once; any other refusal raises BeezeeTxRefusedError. Any failure
         before the broadcast resets the cached sequence. Calls are serialized from sequence reservation to
@@ -397,7 +416,7 @@ class BeezeeAPIDataSource:
             for attempt in range(2):
                 account = await self.reserve_account_info_sequence()
                 try:
-                    tx_bytes = await self._simulate_and_sign(messages, account, memo)
+                    tx_bytes = await self._simulate_and_sign(messages, account, memo, extra_gas)
                 except BeezeeTxRefusedError as error:
                     await self.reset_account_sequence()
                     if error.is_sequence_mismatch and attempt == 0:
@@ -425,9 +444,9 @@ class BeezeeAPIDataSource:
                 raise error
             raise RuntimeError("Beezee tx retry loop exited without a result.")
 
-    async def _simulate_and_sign(self, messages: List[bytes], account: BeezeeAccountInfo, memo: str) -> bytes:
+    async def _simulate_and_sign(self, messages: List[bytes], account: BeezeeAccountInfo, memo: str, extra_gas: int) -> bytes:
         gas_used = await self.simulate_gas(messages, account.sequence, memo=memo)
-        gas_limit = gas_limit_from_simulation(gas_used, self._gas_adjustment)
+        gas_limit = gas_limit_from_simulation(gas_used, self._gas_adjustment) + extra_gas
         return build_signed_transaction(
             signer=self._signer,
             chain_id=self._chain_id,

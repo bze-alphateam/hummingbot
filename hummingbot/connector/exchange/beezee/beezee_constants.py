@@ -76,6 +76,14 @@ DEFAULT_BLOCK_STREAM_TIMEOUT = 20.0
 # Mainnet public-node minimum gas price (ubze per gas unit) on chain v8.2.0.
 DEFAULT_GAS_PRICE = Decimal("0.01")
 DEFAULT_GAS_ADJUSTMENT = Decimal("1.3")
+# Simulation runs against the last committed state, where the tradebin queue is empty. In a block, every create pays
+# extra gas for each message already queued on its market: the tradebin `orderBookQueueMessageScanExtraGas` param
+# plus the store reads of that message (SDK KV gas: a flat cost per iterator step and a cost per key and value byte).
+DEFAULT_QUEUE_MESSAGE_SCAN_GAS = 5000
+KV_ITER_NEXT_COST_FLAT = 30
+KV_READ_COST_PER_BYTE = 3
+# A queued message's store key and value hold its market id twice; this covers the rest (owner, price, amount, ids).
+QUEUE_MESSAGE_FIXED_BYTES = 200
 # Creates and cancels arriving within the window share one tx, at most this many messages per tx.
 DEFAULT_BATCH_WINDOW_MS = 300
 DEFAULT_MAX_MESSAGES_PER_TX = 25
