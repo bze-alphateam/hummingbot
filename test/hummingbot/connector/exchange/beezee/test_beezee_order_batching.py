@@ -236,13 +236,16 @@ class BeezeeBatchingTestCase(BeezeeChainTestCase):
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
         self.windows: List[asyncio.Future] = []
+        self.id_waits: List[asyncio.Future] = []
 
         async def sleep(delay: float):
-            # The batch window passes only when the test lets it; the tx lookup delays pass at once.
-            if delay == WINDOW_MS / 1000:
-                window = asyncio.get_event_loop().create_future()
-                self.windows.append(window)
-                await window
+            # The batch window and a cancel's wait for its order id pass only when the test lets them; the tx lookup
+            # delays pass at once.
+            gates = {WINDOW_MS / 1000: self.windows, CONSTANTS.CANCEL_WAIT_FOR_ORDER_ID: self.id_waits}.get(delay)
+            if gates is not None:
+                gate = asyncio.get_event_loop().create_future()
+                gates.append(gate)
+                await gate
             else:
                 await asyncio.sleep(0)
 
@@ -591,14 +594,64 @@ class BeezeeOrderBatchingTests(BeezeeBatchingTestCase):
         self.assertEqual(sorted(orders), sorted(self._event_ids(MarketEvent.OrderCancelled)))
         self.assertEqual({}, self._failure_messages())
 
-    async def test_cancel_deferred_while_the_create_is_broadcast_is_sent_once_the_order_has_its_id(self):
+    async def test_cancel_all_while_a_create_is_broadcast_waits_for_its_id_and_cancels_it(self):
+        # The stop: cancel_all right after a refresh tx was broadcast, before its block is read.
         self.node.check_tx_gate = asyncio.get_event_loop().create_future()
         created = self.exchange.batch_order_create(self._ladder(2))
         await self._run_until(lambda: len(self.node.broadcast) == 1, "the batch was not broadcast")
 
-        # Too late to drop the create, and the chain has not saved the order yet: the cancel waits for its id.
-        self.exchange.cancel("BZE-USDC", created[1].client_order_id)
+        cancel_all = asyncio.ensure_future(self.exchange.cancel_all(timeout_seconds=5))
         await self._settle()
+        self.assertFalse(cancel_all.done(), "cancel_all gave up before the orders had their ids")
+        self.node.check_tx_gate.set_result(None)
+        self.node.check_tx_gate = None
+        await self._run_until(lambda: self.windows and not self.windows[-1].done(), "the cancels were not queued")
+        self.windows[-1].set_result(None)
+        results = await cancel_all
+
+        self.assertEqual(
+            sorted((order.client_order_id, True) for order in created), sorted((r.order_id, r.success) for r in results)
+        )
+        # One cancel tx for both chain ids, sent before cancel_all returned; no wait ran into its timeout.
+        self.assertEqual(2, len(self.node.landed))
+        self.assertEqual(
+            sorted([f"{6820000:024d}", f"{6820001:024d}"]), sorted(m.order_id for m in self.node.landed[1][1].messages)
+        )
+        self.assertTrue(self.id_waits and all(gate.cancelled() for gate in self.id_waits))
+        await self._run_until(
+            lambda: sorted(self._event_ids(MarketEvent.OrderCancelled)) == sorted(o.client_order_id for o in created),
+            "not cancelled",
+        )
+
+    async def test_cancel_of_an_order_whose_broadcast_is_refused_ends_without_waiting_out_its_timeout(self):
+        self.node.check_tx_gate = asyncio.get_event_loop().create_future()
+        self.node.check_tx_answers = [(13, "insufficient fee")]
+        created = self.exchange.batch_order_create(self._ladder(1))
+        await self._run_until(lambda: len(self.node.broadcast) == 1, "the batch was not broadcast")
+
+        cancel_all = asyncio.ensure_future(self.exchange.cancel_all(timeout_seconds=5))
+        await self._settle()
+        self.node.check_tx_gate.set_result(None)
+        self.node.check_tx_gate = None
+        results = await cancel_all
+
+        # The create failed while the cancel waited: nothing to cancel, nothing sent, no wait left behind.
+        self.assertEqual([(created[0].client_order_id, False)], [(r.order_id, r.success) for r in results])
+        self.assertEqual(([], 1), (self.node.landed, len(self.node.broadcast)))
+        self.assertIn(created[0].client_order_id, self._failure_messages())
+        self.assertTrue(self.id_waits and all(gate.cancelled() for gate in self.id_waits))
+
+    async def test_cancel_whose_wait_for_the_id_times_out_is_sent_once_the_order_has_its_id(self):
+        self.node.check_tx_gate = asyncio.get_event_loop().create_future()
+        created = self.exchange.batch_order_create(self._ladder(2))
+        await self._run_until(lambda: len(self.node.broadcast) == 1, "the batch was not broadcast")
+
+        # Too late to drop the create, and the chain has not saved the order within the wait: the cancel is deferred.
+        self.exchange.cancel("BZE-USDC", created[1].client_order_id)
+        await self._run_until(lambda: self.id_waits, "the cancel did not wait for the order id")
+        self.id_waits[0].set_result(None)
+        await self._settle()
+        self.assertEqual(1, len(self.node.broadcast))
         self.node.check_tx_gate.set_result(None)
         self.node.check_tx_gate = None
         await self._settle()
@@ -621,6 +674,8 @@ class BeezeeOrderBatchingTests(BeezeeBatchingTestCase):
         created = self.exchange.batch_order_create(self._ladder(1))
         await self._run_until(lambda: len(self.node.broadcast) == 1, "the batch was not broadcast")
         self.exchange.cancel("BZE-USDC", created[0].client_order_id)
+        await self._run_until(lambda: self.id_waits, "the cancel did not wait for the order id")
+        self.id_waits[0].set_result(None)
         await self._settle()
         self.node.check_tx_gate.set_result(None)
         self.node.check_tx_gate = None

@@ -56,6 +56,9 @@ ORDER_SAVED_EVENT = "bze.tradebin.OrderSavedEvent"
 ORDER_CANCELED_EVENT = "bze.tradebin.OrderCanceledEvent"
 # A queued message's outcome is looked for in its tx block and the 19 blocks after it.
 ORDER_OUTCOME_BLOCK_WINDOW = 20
+# A cancel of an order whose create tx is on its way waits this long (s) for the order's chain id before it is
+# deferred; below cancel_all's 20 s at stop, so a stop right after a refresh still cancels its orders.
+CANCEL_WAIT_FOR_ORDER_ID = 15.0
 # Tx lookup after a broadcast: wait 1 s, 2 s, 3 s, then every 3 s, at most 60 s in total.
 TX_LOOKUP_DELAYS = (1.0, 2.0, 3.0) + (3.0,) * 18
 # Fills missed while the bot was down are read back from at most this many blocks.

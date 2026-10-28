@@ -152,6 +152,8 @@ class BeezeeExchange(ExchangePyBase):
         # Orders asked to cancel while their create tx was on its way: cancelled once the chain gives them an id.
         self._cancel_requested: Set[str] = set()
         self._deferred_cancel_tasks: Dict[str, asyncio.Task] = {}
+        # Set on every order state update, for cancels waiting for their order's chain id.
+        self._order_progress = asyncio.Event()
         # The messages of one batch tx share one tx lookup.
         self._tx_fetch_tasks: Dict[str, asyncio.Task] = {}
         self._order_batcher = BeezeeOrderBatcher(
@@ -334,9 +336,14 @@ class BeezeeExchange(ExchangePyBase):
             # Its create task now ends the order CANCELED (see _on_order_failure): nothing reaches the chain.
             self.logger().info(f"Beezee order {order_id} cancelled before its create was sent.")
             return True
+        if len(tracked_order.exchange_order_id or "") != CONSTANTS.ORDER_ID_LENGTH:
+            # Its create tx is on its way. Meanwhile no retry or single send may place it again.
+            self._cancel_requested.add(order_id)
+            if not await self._wait_for_order_id(tracked_order):
+                # It ended (filled, refunded or failed) while the cancel waited: nothing is left to cancel.
+                return False
         exchange_order_id = tracked_order.exchange_order_id
         if not exchange_order_id or len(exchange_order_id) != CONSTANTS.ORDER_ID_LENGTH:
-            self._cancel_requested.add(order_id)
             self.logger().debug(
                 f"Deferring Beezee cancel until the chain saves the order. client_order_id={order_id}"
             )
@@ -391,6 +398,36 @@ class BeezeeExchange(ExchangePyBase):
                 self._update_order_state(order, OrderState.CANCELED)
             return
         super()._on_order_failure(order_id, trading_pair, *args, exception=exception, **kwargs)
+
+    async def _wait_for_order_id(self, order: InFlightOrder) -> bool:
+        """Waits up to CANCEL_WAIT_FOR_ORDER_ID for an order whose create tx is on its way to get its chain id.
+        False when the order ended meanwhile; True otherwise, with or without the id."""
+
+        def waiting() -> bool:
+            return not order.is_done and len(order.exchange_order_id or "") != CONSTANTS.ORDER_ID_LENGTH
+
+        if not waiting():
+            return not order.is_done
+        timer = asyncio.ensure_future(self._sleep(CONSTANTS.CANCEL_WAIT_FOR_ORDER_ID))
+        try:
+            while waiting() and not timer.done():
+                progress = asyncio.ensure_future(self._order_progress.wait())
+                try:
+                    await asyncio.wait({timer, progress}, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    progress.cancel()
+        finally:
+            timer.cancel()
+        return not order.is_done
+
+    def _report_order_progress(self, _update_task: Optional[asyncio.Task] = None):
+        self._order_progress.set()
+        self._order_progress.clear()
+
+    def _update_order_after_failure(self, order_id: str, trading_pair: str, exception: Optional[Exception] = None):
+        super()._update_order_after_failure(order_id, trading_pair, exception)
+        # The tracker applies the FAILED update in a task created just now, so this runs after it.
+        asyncio.get_event_loop().call_soon(self._report_order_progress)
 
     def _without_cancelled_creates(self, items: List[BatchedOrderMessage]) -> List[BatchedOrderMessage]:
         # A create whose order was asked to cancel while its batch was being sent is never sent again.
@@ -1253,7 +1290,7 @@ class BeezeeExchange(ExchangePyBase):
         return any(open_order.get("id") == order.exchange_order_id for open_order in open_orders)
 
     def _update_order_state(self, order: InFlightOrder, state: OrderState):
-        self._order_tracker.process_order_update(
+        update_task = self._order_tracker.process_order_update(
             OrderUpdate(
                 trading_pair=order.trading_pair,
                 update_timestamp=self.current_timestamp,
@@ -1262,6 +1299,7 @@ class BeezeeExchange(ExchangePyBase):
                 exchange_order_id=order.exchange_order_id,
             )
         )
+        update_task.add_done_callback(self._report_order_progress)
 
     @staticmethod
     def _open_state(order: InFlightOrder) -> OrderState:
