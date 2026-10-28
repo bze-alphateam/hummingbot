@@ -3,7 +3,7 @@
 ########################################################
 # Copy to conf/strategies/beezee_pmm_testnet.yml, set order_amount, then `import beezee_pmm_testnet.yml`.
 # Network: bzetestnet-3. In `connect beezee` pick network `testnet` and enter
-#   REST https://testnet.getbze.com, RPC https://testnet-rpc.getbze.com, gas price 0.001 (testnet node minimum).
+#   REST https://testnet.getbze.com, RPC https://testnet-rpc.getbze.com, gas price 0.01 (testnet chain minimum).
 # The run guide is in README_BZE.md, section "Testnet run".
 
 template_version: 24

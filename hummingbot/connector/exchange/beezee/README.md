@@ -215,7 +215,9 @@ block) and puts it on every outcome event.
   `FILLED`. Taker fills short of the amount and no save means the chain refunded the rest: the order ends `CANCELED`
   with those fills, not `FILLED`.
 - Every block (websocket `NewBlock`, with the status poll as fallback) is read once in order, missed heights included.
-  An `OrderExecutedEvent` whose `id` is one of the account's resting orders is a maker fill of that order.
+  An `OrderExecutedEvent` whose `id` is one of the account's resting orders is a maker fill of that order, and an
+  `OrderCanceledEvent` of the account with that `id` cancels it (order ids are never reused): a cancel made outside the
+  bot, or one sent just before a stop whose state was saved earlier, is seen in its block.
 - A block that fails to load 3 times in a row (pruned or refused by the node) is skipped with a warning. Creates and
   cancels whose outcome block it was are settled from the order book, and resting orders take their fills through
   that block from the chain state at that height.
