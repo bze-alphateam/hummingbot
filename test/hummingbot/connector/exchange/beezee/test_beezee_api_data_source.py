@@ -233,6 +233,51 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
 
     @aioresponses()
+    async def test_extra_gas_is_added_to_the_simulated_gas_limit_and_paid_in_the_fee(self, mock_api):
+        self._mock_account(mock_api, sequence=3)
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_wanted": "0", "gas_used": "100001"}})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "AB" * 32}})
+
+        await self.data_source.simulate_sign_and_broadcast(self.messages, memo="hbot:OID1", extra_gas=6221)
+
+        # gas limit = ceil(100001 * 1.3) + 6221 = 136223; fee = ceil(136223 * 0.01) = 1363 ubze
+        expected_tx = build_signed_transaction(
+            signer=self.signer,
+            chain_id="beezee-1",
+            account_number=7,
+            sequence=3,
+            messages=self.messages,
+            fee_denom="ubze",
+            fee_amount="1363",
+            gas_limit=136223,
+            memo="hbot:OID1",
+        )
+        self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
+
+    @aioresponses()
+    async def test_queued_message_gas_follows_the_chains_scan_param_and_market_id_length(self, mock_api):
+        # Before the params are read: the chain default scan gas 5000 + 30 + 3 * (2 * 10 + 200) bytes.
+        self.assertEqual(5690, self.data_source.queued_message_gas("ubze/uusdc"))
+        self.assertEqual(5690 + 3 * 2 * 3, self.data_source.queued_message_gas("ubze/factory1"))
+
+        mock_api.get(
+            f"{REST_URL}{CONSTANTS.TRADEBIN_PARAMS_PATH_URL}",
+            payload={"params": {"orderBookQueueMessageScanExtraGas": "7000"}},
+        )
+        mock_api.get(
+            f"{REST_URL}{CONSTANTS.TRADEBIN_PARAMS_PATH_URL}",
+            payload={"params": {"order_book_queue_message_scan_extra_gas": "6000"}},
+        )
+        mock_api.get(f"{REST_URL}{CONSTANTS.TRADEBIN_PARAMS_PATH_URL}", payload={"params": {}})
+
+        await self.data_source.get_tradebin_params()
+        self.assertEqual(7690, self.data_source.queued_message_gas("ubze/uusdc"))
+        await self.data_source.get_tradebin_params()
+        self.assertEqual(6690, self.data_source.queued_message_gas("ubze/uusdc"))
+        await self.data_source.get_tradebin_params()
+        self.assertEqual(5690, self.data_source.queued_message_gas("ubze/uusdc"))
+
+    @aioresponses()
     async def test_simulation_error_is_never_broadcast(self, mock_api):
         self._mock_account(mock_api, sequence=3)
         mock_api.post(
