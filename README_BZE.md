@@ -145,7 +145,7 @@ Network facts (October 2026, chain v8.2.0):
 | Chain id | `bzetestnet-3` |
 | REST | `https://testnet.getbze.com` |
 | RPC | `https://testnet-rpc.getbze.com` (serves `/block_results` for recent heights, as order tracking needs) |
-| Minimum gas price | `0.001ubze` |
+| Minimum gas price | `0.01ubze` (chain param `ValidatorMinGasFee`; 0.001 is rejected as insufficient fees) |
 | Market | `ibc/9DA252F9…80CC7/factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd`, the only one, listed as `ULMN-TUSDC` |
 | Explorer / dex | testnet-explorer.getbze.com / testnet-dex.getbze.com |
 
@@ -158,7 +158,7 @@ Network facts (October 2026, chain v8.2.0):
 3. **Connect.** In the client run `connect beezee` and answer:
    - network: `testnet`; REST `https://testnet.getbze.com`; RPC `https://testnet-rpc.getbze.com`; websocket: leave
      empty (derived from the RPC); chain id `bzetestnet-3`; prefix `bze`; native denom `ubze`;
-   - gas price `0.001` (the node minimum; a higher one works too), gas adjustment `1.3`;
+   - gas price `0.01` (the chain minimum; a higher one works too), gas adjustment `1.3`;
    - account type `wallet_mnemonic`, the throwaway mnemonic, empty passphrase, the default HD path, and the address.
 
    Then `balance`: it shows BZE, ULMN and TUSDC as in the dex app.
@@ -212,7 +212,8 @@ Same steps as the testnet run, with:
 - **Order tracking.** The order book is asynchronous: a tx only queues the order, and the chain executes it in that
   block or a later one. The connector looks up each create/cancel tx for its queue `message_id`, then reads the blocks
   (RPC `/block_results`) for the events carrying that id: fills, the saved order and its id, the cancel. A resting
-  order's later fills are matched by its order id. An order with no outcome within 20 blocks of its tx is marked
+  order's later fills and its cancel are matched by its order id, so a cancel made outside the bot (or sent by a
+  `stop` right before the bot exited) is seen in its block. An order with no outcome within 20 blocks of its tx is marked
   failed. A partial fill whose rest the chain refunds ends `CANCELED` with its fills. After a restart, missed fills
   are read back from the last processed block (up to 1000 blocks); beyond that the connector reconciles resting
   orders from the chain and logs a warning. The RPC endpoint must serve `/block_results` for recent heights.

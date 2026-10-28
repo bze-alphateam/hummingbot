@@ -958,6 +958,15 @@ class BeezeeExchange(ExchangePyBase):
                     )
                     if message is not None:
                         canceled.add(message.client_order_id)
+                        continue
+                    # An order id is never reused, so a cancel of one of our resting orders settles it even without
+                    # a queued cancel: one whose state was saved before the cancel tx, or one cancelled outside the bot.
+                    resting_order = resting.get(event.get("id"))
+                    if (
+                        resting_order is not None
+                        and market_ids.get(resting_order.trading_pair) == event.get("market_id")
+                    ):
+                        canceled.add(resting_order.client_order_id)
             for client_order_id in set(outcomes) | canceled | maker_filled:
                 self._settle_order(client_order_id, height, outcomes, canceled)
             for message in superseded:
