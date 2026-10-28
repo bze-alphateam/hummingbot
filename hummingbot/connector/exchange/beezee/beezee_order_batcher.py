@@ -25,6 +25,13 @@ class BatchedOrderMessage:
             self.result.set_exception(error)
 
 
+class BeezeeCreateWithdrawnError(IOError):
+    """The order was cancelled while its create message still waited for its tx: nothing was sent."""
+
+    def __init__(self, client_order_id: str):
+        super().__init__(f"Beezee order {client_order_id} was cancelled before its create was sent.")
+
+
 BatchSender = Callable[[List[BatchedOrderMessage]], Awaitable[None]]
 
 
@@ -71,6 +78,15 @@ class BeezeeOrderBatcher:
             # The same order's message is already waiting: one message, one outcome.
             item = queued
         return await asyncio.shield(item.result)
+
+    def withdraw_create(self, client_order_id: str) -> bool:
+        """Takes a create still waiting for its tx out of the queue, failing it with BeezeeCreateWithdrawnError.
+        False when there is none: the create was never submitted, or its batch is already being sent."""
+        item = self._creates.pop(client_order_id, None)
+        if item is None:
+            return False
+        item.reject(BeezeeCreateWithdrawnError(client_order_id))
+        return True
 
     def stop(self):
         """Fails the messages still waiting for their tx. A batch already being sent is left to finish: its tx may be

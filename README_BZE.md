@@ -240,6 +240,10 @@ Same steps as the testnet run, with:
   mismatch re-signs the whole batch once. The 30 tx/min limit counts batch txs, and the messages of one tx share one
   tx lookup. Both settings are top-level keys of the connector config (`batch_window_ms: 0` still batches whatever
   is submitted together, but waits for nothing).
+- **Cancelling an order that is not on chain yet.** If its create still waits for its batch window, the create is
+  taken out of the batch: nothing is sent and the order ends `CANCELED` (so a `stop` during the window places
+  nothing). If its create tx is already on its way, the cancel is sent as soon as the chain gives the order its id,
+  and a refused batch's single-send fallback skips that create.
 - **Fee bookkeeping.** The chain charges the tradebin fee once per order when the create runs, so the connector books
   it on the order's first fill only. An order that rests and never fills still paid the maker fee, which Hummingbot
   cannot record without a fill.
