@@ -378,3 +378,32 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
             gas_limit=130000,
         )
         self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
+
+    @aioresponses()
+    async def test_refused_broadcast_resets_the_sequence(self, mock_api):
+        # CheckTx refused the tx (not a sequence mismatch), so sequence 3 was never used on chain.
+        self._mock_account(mock_api, sequence=3)
+        self._mock_account(mock_api, sequence=3)
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "100000"}}, repeat=True)
+        mock_api.post(self.broadcast_url, payload={"tx_response": {
+            "code": 5, "codespace": "sdk", "raw_log": "spendable balance 0ubze is smaller than 1300ubze: insufficient funds", "txhash": "",
+        }})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "AA" * 32}})
+
+        with self.assertRaises(BeezeeTxRefusedError) as context:
+            await self.data_source.simulate_sign_and_broadcast(self.messages)
+        await self.data_source.simulate_sign_and_broadcast(self.messages)
+
+        self.assertIn("insufficient funds", str(context.exception))
+        self.assertEqual(2, len(mock_api.requests[("GET", URL(self.account_url))]))
+        signed_at_3 = build_signed_transaction(
+            signer=self.signer,
+            chain_id="beezee-1",
+            account_number=7,
+            sequence=3,
+            messages=self.messages,
+            fee_denom="ubze",
+            fee_amount="1300",
+            gas_limit=130000,
+        )
+        self.assertEqual([build_broadcast_request(signed_at_3)] * 2, self._request_bodies(mock_api, self.broadcast_url))

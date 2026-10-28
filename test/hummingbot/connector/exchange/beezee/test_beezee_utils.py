@@ -27,6 +27,10 @@ from hummingbot.connector.exchange.beezee.beezee_utils import (
 )
 from hummingbot.core.data_type.trade_fee import TokenAmount
 
+TEST_MNEMONIC = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+# What `bzed keys export --unarmored-hex` (bzed v8.2.0) gives for TEST_MNEMONIC on m/44'/118'/0'/0/0.
+TEST_MNEMONIC_PRIVATE_KEY = "c4a48e2fce1481cd3294b4490f6678090ea98d3d0e5cd984558ab0968741b104"  # noqa: mock
+
 
 class BeezeeUtilsTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -122,24 +126,19 @@ class BeezeeUtilsTests(unittest.TestCase):
     def test_normalize_hd_path_accepts_standard_cosmos_path(self):
         self.assertEqual("m/44'/118'/0'/0/0", normalize_hd_path("m/44'/118'/0'/0/0"))
 
-    def test_derive_private_key_from_mnemonic_is_stable(self):
-        mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    def test_derive_private_key_from_mnemonic_matches_bzed(self):
+        private_key = derive_private_key_from_mnemonic(mnemonic=TEST_MNEMONIC)
 
-        private_key_a = derive_private_key_from_mnemonic(mnemonic=mnemonic)
-        private_key_b = derive_private_key_from_mnemonic(mnemonic=mnemonic)
+        self.assertEqual(TEST_MNEMONIC_PRIVATE_KEY, private_key)
 
-        self.assertEqual(private_key_a, private_key_b)
-        self.assertEqual(64, len(private_key_a))
+    def test_derive_private_key_from_mnemonic_honours_hd_path_and_passphrase(self):
+        self.assertNotEqual(TEST_MNEMONIC_PRIVATE_KEY, derive_private_key_from_mnemonic(TEST_MNEMONIC, hd_path="m/44'/118'/0'/0/1"))
+        self.assertNotEqual(TEST_MNEMONIC_PRIVATE_KEY, derive_private_key_from_mnemonic(TEST_MNEMONIC, passphrase="x"))
 
     def test_private_key_from_account_mode_derives_from_mnemonic_wallet(self):
-        account_mode = BeezeeMnemonicWalletAccountMode(
-            mnemonic="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-        )
+        account_mode = BeezeeMnemonicWalletAccountMode(mnemonic=TEST_MNEMONIC)
 
-        private_key = private_key_from_account_mode(account_mode)
-
-        self.assertIsNotNone(private_key)
-        self.assertEqual(64, len(private_key))
+        self.assertEqual(TEST_MNEMONIC_PRIVATE_KEY, private_key_from_account_mode(account_mode))
 
     def test_config_map_accepts_testnet_network(self):
         config = BeezeeConfigMap(

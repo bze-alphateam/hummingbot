@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import time
 import unittest
 from decimal import Decimal
@@ -16,11 +17,13 @@ from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeMnemonicWalletAccountMode,
     BeezeeReadOnlyAccountMode,
     market_from_data,
-    private_key_from_account_mode,
 )
+from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.core.data_type.common import OrderType, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
 from hummingbot.core.data_type.trade_fee import TokenAmount
+from hummingbot.core.event.event_logger import EventLogger
+from hummingbot.core.event.events import MarketEvent
 
 
 class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
@@ -84,6 +87,16 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.exchange._data_source = data_source
         self.exchange._signer = Mock()
         return data_source
+
+    async def _status_poll(self, force_halted_refresh: bool = False):
+        # Drives the connector's status poll; only upstream's balance and order-status steps are stubbed.
+        self.exchange._update_balances = AsyncMock()
+        self.exchange._update_order_status = AsyncMock()
+        if force_halted_refresh:
+            self.exchange._last_halted_denoms_refresh = time.time() - CONSTANTS.HALTED_DENOMS_REFRESH_INTERVAL
+        await self.exchange._status_polling_loop_fetch_updates()
+        for _ in range(20):
+            await asyncio.sleep(0)
 
     async def _force_halted_denoms_refresh(self):
         self.exchange._last_halted_denoms_refresh = time.time() - CONSTANTS.HALTED_DENOMS_REFRESH_INTERVAL
@@ -281,28 +294,70 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("000000000000000000000043", data_source.broadcast_cancel_order.call_args.kwargs["order_id"])
 
     async def test_failed_halt_cancel_is_retried_on_the_next_poll(self):
-        data_source = self._halt_data_source([{"ubze"}, {"ubze"}])
+        data_source = self._halt_data_source([{"ubze"}])
         data_source.broadcast_cancel_order = AsyncMock(side_effect=[
             IOError("Beezee tx broadcast failed: timed out"),
             {"tx_response": {"code": 0, "txhash": "CA" * 32}},
         ])
         self._track_order("OID-OPEN", "000000000000000000000044")
 
-        await self._force_halted_denoms_refresh()
-        await self._drain_tasks()
-        await self._force_halted_denoms_refresh()
-        await self._drain_tasks()
+        await self._status_poll()
+        self.assertEqual(1, data_source.broadcast_cancel_order.await_count)
+        # The halted list is not due again: only the status poll's re-cancel runs.
+        await self._status_poll()
 
+        self.assertEqual(1, data_source.get_halted_denoms.await_count)
         self.assertEqual(2, data_source.broadcast_cancel_order.await_count)
         self.assertTrue(self.exchange.in_flight_orders["OID-OPEN"].is_pending_cancel_confirmation)
 
+    async def test_unhalt_stops_cancelling_and_logs_once(self):
+        data_source = self._halt_data_source([{"ubze"}, set(), set(), set()])
+        data_source.broadcast_cancel_order = AsyncMock(side_effect=IOError("Beezee tx broadcast failed: timed out"))
+        self._track_order("OID-OPEN", "000000000000000000000045")
+
+        await self._status_poll()
+        self.assertEqual(1, data_source.broadcast_cancel_order.await_count)
+        for _ in range(3):
+            await self._status_poll(force_halted_refresh=True)
+
+        self.assertEqual(1, data_source.broadcast_cancel_order.await_count)
+        self.assertEqual(1, self._logged(logging.INFO, "Beezee market BZE-USDC is no longer halted"))
+        self.assertFalse(self.exchange.in_flight_orders["OID-OPEN"].is_done)
+
+    async def test_buy_on_halted_pair_fails_the_order_without_signing(self):
+        data_source = self._halt_data_source([{"uusdc"}])
+        self.exchange._set_current_timestamp(1640000000)
+        self.exchange._trading_rules["BZE-USDC"] = TradingRule(
+            trading_pair="BZE-USDC",
+            min_order_size=Decimal("0.000001"),
+            min_price_increment=Decimal("0.0000000001"),
+            min_base_amount_increment=Decimal("0.000001"),
+            min_notional_size=Decimal("0.000002"),
+        )
+        failure_logger = EventLogger()
+        self.exchange.add_listener(MarketEvent.OrderFailure, failure_logger)
+
+        order_id = self.exchange.buy("BZE-USDC", Decimal("1"), OrderType.LIMIT, Decimal("2.5"))
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+        self.assertEqual(OrderState.FAILED, self.exchange._order_tracker.all_orders[order_id].current_state)
+        self.assertEqual(
+            [(order_id, "Beezee market ubze/uusdc is halted (denom uusdc)", "ValueError")],
+            [(event.order_id, event.error_message, event.error_type) for event in failure_logger.event_log],
+        )
+        data_source.broadcast_create_order.assert_not_awaited()
+
     async def test_halted_denoms_refresh_waits_for_the_interval(self):
-        data_source = self._halt_data_source([set(), set()])
+        data_source = self._halt_data_source([set(), set(), set()])
 
         await self.exchange._update_halted_denoms_if_due()
         await self.exchange._update_halted_denoms_if_due()
-
         self.assertEqual(1, data_source.get_halted_denoms.await_count)
+
+        self.exchange._last_halted_denoms_refresh -= CONSTANTS.HALTED_DENOMS_REFRESH_INTERVAL
+        await self.exchange._update_halted_denoms_if_due()
+        self.assertEqual(2, data_source.get_halted_denoms.await_count)
 
     async def test_denom_halted_refusal_marks_pair_halted(self):
         # The node's halted list lags behind the refusal, so the market itself is marked halted.
@@ -320,6 +375,36 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, data_source.broadcast_create_order.await_count)
         self.assertEqual(1, self._logged(logging.WARNING, "Beezee market BZE-USDC is halted"))
 
+    async def test_delivered_create_tx_with_code_4017_marks_pair_halted(self):
+        # The node does not list the halted denom yet: the delivered 4017 is the only halt signal.
+        data_source = self._halt_data_source([set(), set()])
+        data_source.get_tx = AsyncMock(return_value={"tx_response": {
+            "code": 4017, "codespace": "tradebin", "raw_log": "denom is halted", "height": "100",
+        }})
+
+        async def no_wait(_delay: float):
+            await asyncio.sleep(0)
+
+        self.exchange._sleep = no_wait
+        self.exchange.start_tracking_order(
+            order_id="OID-D",
+            exchange_order_id=None,
+            trading_pair="BZE-USDC",
+            trade_type=TradeType.BUY,
+            price=Decimal("2.5"),
+            amount=Decimal("1"),
+            order_type=OrderType.LIMIT,
+        )
+
+        await self._place_buy("OID-D")
+        await self._drain_tasks()
+
+        self.assertEqual(OrderState.FAILED, self.exchange._order_tracker.fetch_order("OID-D").current_state)
+        with self.assertRaises(ValueError) as context:
+            await self._place_buy()
+        self.assertEqual("Beezee market ubze/uusdc is halted (denom unknown, refused by the chain)", str(context.exception))
+        data_source.broadcast_create_order.assert_awaited_once()
+
     async def test_unhalt_allows_trading_again(self):
         data_source = self._halt_data_source([{"ubze"}, set()])
 
@@ -333,28 +418,27 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         data_source.broadcast_create_order.assert_awaited_once()
         self.assertEqual(1, self._logged(logging.INFO, "Beezee market BZE-USDC is no longer halted"))
 
-    async def test_exchange_initializes_signer_from_mnemonic_wallet_mode(self):
-        mnemonic_account = BeezeeMnemonicWalletAccountMode(
-            mnemonic="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
-        )
+    @aioresponses()
+    async def test_mnemonic_wallet_mode_trades_as_the_bzed_address(self, mock_api):
+        # bzed v8.2.0 recovers this address from the public BIP39 test mnemonic on m/44'/118'/0'/0/0.
+        expected_address = "bze19rl4cm2hmr8afy4kldpxz3fka4jguq0apypkdz"
         config = BeezeeConfigMap(
             connector="beezee",
             network=BeezeeMainnetNetworkMode(),
-            account_type=mnemonic_account,
+            account_type=BeezeeMnemonicWalletAccountMode(
+                mnemonic="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            ),
         )
+        exchange = BeezeeExchange(connector_configuration=config, trading_pairs=["BZE-USDC"], trading_required=True)
+        rest_url = exchange._rest_endpoint
+        mock_api.get(f"{rest_url}{CONSTANTS.BALANCES_PATH_URL}/{expected_address}", payload={"balances": [{"denom": "ubze", "amount": "1000000"}]})
+        mock_api.get(re.compile(rf"^{re.escape(rest_url + CONSTANTS.ALL_USER_DUST_PATH_URL)}\?address={expected_address}$"), payload={"list": []})
+        mock_api.get(f"{rest_url}{CONSTANTS.DENOM_METADATA_PATH_URL}/ubze", payload={"metadata": {
+            "symbol": "BZE",
+            "display": "bze",
+            "denom_units": [{"denom": "ubze", "exponent": 0}, {"denom": "bze", "exponent": 6}],
+        }})
 
-        exchange = BeezeeExchange(
-            connector_configuration=config,
-            trading_pairs=["BZE-USDC"],
-            trading_required=True,
-        )
+        await exchange._update_balances()
 
-        self.assertIsNotNone(exchange._signer)
-        self.assertEqual(
-            exchange._signer.address,
-            exchange._account_address,
-        )
-        self.assertEqual(
-            private_key_from_account_mode(mnemonic_account),
-            exchange._signer._private_key_bytes.hex(),
-        )
+        self.assertEqual(Decimal("1"), exchange.get_balance("BZE"))
