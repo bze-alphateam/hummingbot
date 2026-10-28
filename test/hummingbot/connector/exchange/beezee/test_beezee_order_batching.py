@@ -125,6 +125,8 @@ class FakeNode:
     next_order_id: int = 6820000
     # While set, a broadcast reaches the node but its answer waits for this future.
     check_tx_gate: Optional[asyncio.Future] = None
+    # While set, a simulation reaches the node but its answer waits for this future.
+    simulate_gate: Optional[asyncio.Future] = None
 
     @property
     def height(self) -> int:
@@ -137,9 +139,11 @@ class FakeNode:
             and Decimal(message.price) == price
         )
 
-    def simulate(self, url, **kwargs) -> CallbackResult:
+    async def simulate(self, url, **kwargs) -> CallbackResult:
         sent = decode_tx(kwargs)
         self.simulated.append(sent)
+        if self.simulate_gate is not None:
+            await self.simulate_gate
         if sent.sequence != self.sequence:
             return CallbackResult(status=400, payload={
                 "code": 32, "message": f"account sequence mismatch, expected {self.sequence}, got {sent.sequence}",
@@ -551,6 +555,102 @@ class BeezeeOrderBatchingTests(BeezeeBatchingTestCase):
         self.assertEqual(
             {order.client_order_id: f"Beezee order create failed: {mismatch}" for order in created}, self._failure_messages()
         )
+
+    # --- cancels of orders whose create is not on chain yet ---
+
+    async def test_cancel_of_a_create_waiting_for_its_window_sends_nothing_and_cancels_the_order(self):
+        kept = self.exchange.buy("BZE-USDC", Decimal("10"), OrderType.LIMIT, Decimal("0.0003"))
+        dropped = self.exchange.sell("BZE-USDC", Decimal("11"), OrderType.LIMIT, Decimal("0.0007"))
+        await self._settle()
+
+        self.exchange.cancel("BZE-USDC", dropped)
+        await self._settle()
+        self.windows[0].set_result(None)
+        await self._settle()
+
+        self.assertEqual([[("create", "buy")]], [[(m.kind, m.order_type) for m in sent.messages] for sent in self.node.simulated])
+        self.assertEqual([dropped], self._event_ids(MarketEvent.OrderCancelled))
+        self.assertEqual({}, self._failure_messages())
+        self.assertEqual(OrderState.CANCELED, self.exchange._order_tracker.all_orders[dropped].current_state)
+        await self._run_until(lambda: len(self._exchange_id(kept) or "") == 24, "not rested")
+        self._assert_rests_as_sent(kept)
+
+    async def test_cancel_all_at_stop_with_creates_in_the_window_sends_nothing(self):
+        # The strategy stop: cancel_all while the refresh's creates still wait for their window.
+        orders = [self.exchange.buy("BZE-USDC", Decimal(10 + index), OrderType.LIMIT, Decimal("0.0003")) for index in range(4)]
+        await self._settle()
+
+        results = await self.exchange.cancel_all(timeout_seconds=1)
+        for window in self.windows:
+            if not window.done():
+                window.set_result(None)
+        await self._settle()
+
+        self.assertEqual(sorted((order, True) for order in orders), sorted((r.order_id, r.success) for r in results))
+        self.assertEqual(([], []), (self.node.simulated, self.node.broadcast))
+        self.assertEqual(sorted(orders), sorted(self._event_ids(MarketEvent.OrderCancelled)))
+        self.assertEqual({}, self._failure_messages())
+
+    async def test_cancel_deferred_while_the_create_is_broadcast_is_sent_once_the_order_has_its_id(self):
+        self.node.check_tx_gate = asyncio.get_event_loop().create_future()
+        created = self.exchange.batch_order_create(self._ladder(2))
+        await self._run_until(lambda: len(self.node.broadcast) == 1, "the batch was not broadcast")
+
+        # Too late to drop the create, and the chain has not saved the order yet: the cancel waits for its id.
+        self.exchange.cancel("BZE-USDC", created[1].client_order_id)
+        await self._settle()
+        self.node.check_tx_gate.set_result(None)
+        self.node.check_tx_gate = None
+        await self._settle()
+
+        # The cancel goes into the next batch, like any other.
+        await self._run_until(lambda: self.windows and not self.windows[-1].done(), "the deferred cancel was not queued")
+        self.windows[-1].set_result(None)
+        await self._run_until(lambda: len(self.node.landed) == 2, "the deferred cancel was not sent")
+        # The node saves the batch's creates as 6820000 and 6820001, in message order.
+        self.assertEqual([("cancel", f"{6820001:024d}")], [(m.kind, m.order_id) for m in self.node.landed[1][1].messages])
+        await self._run_until(
+            lambda: created[1].client_order_id in self._event_ids(MarketEvent.OrderCancelled), "not cancelled"
+        )
+        self.assertEqual([created[1].client_order_id], self._event_ids(MarketEvent.OrderCancelled))
+        self.assertEqual({}, self._failure_messages())
+        self._assert_rests_as_sent(created[0].client_order_id)
+
+    async def test_stopping_while_a_deferred_cancel_waits_for_its_window_ends_it_quietly(self):
+        self.node.check_tx_gate = asyncio.get_event_loop().create_future()
+        created = self.exchange.batch_order_create(self._ladder(1))
+        await self._run_until(lambda: len(self.node.broadcast) == 1, "the batch was not broadcast")
+        self.exchange.cancel("BZE-USDC", created[0].client_order_id)
+        await self._settle()
+        self.node.check_tx_gate.set_result(None)
+        self.node.check_tx_gate = None
+        await self._run_until(lambda: self.windows and not self.windows[-1].done(), "the deferred cancel was not queued")
+
+        await self.exchange.stop_network()
+        await self._settle()
+
+        self.assertEqual(1, len(self.node.landed))
+        self.assertFalse(self._logged(logging.ERROR, "Failed to cancel order"))
+
+    async def test_single_send_fallback_skips_a_create_cancelled_while_its_batch_was_simulated(self):
+        refusal = "failed to execute message; message index: 1: amount should be bigger than: 50000000: invalid order amount"
+        self.node.refuse_simulation = (
+            lambda sent: refusal if any(message.amount == "11000000" for message in sent.messages) else None
+        )
+        self.node.simulate_gate = asyncio.get_event_loop().create_future()
+        created = self.exchange.batch_order_create(self._ladder(3))
+        await self._run_until(lambda: len(self.node.simulated) == 1, "the batch was not simulated")
+
+        self.exchange.cancel("BZE-USDC", created[0].client_order_id)
+        await self._settle()
+        self.node.simulate_gate.set_result(None)
+        self.node.simulate_gate = None
+        await self._settle()
+
+        self.assertEqual([f"hbot:{created[2].client_order_id}"], [sent.memo for _, sent in self.node.landed])
+        self.assertEqual([3, 1, 1], [len(sent.messages) for sent in self.node.simulated])
+        self.assertEqual([created[0].client_order_id], self._event_ids(MarketEvent.OrderCancelled))
+        self.assertEqual({created[1].client_order_id}, set(self._failure_messages()))
 
     async def test_stopping_while_a_batch_is_broadcast_keeps_following_its_orders(self):
         # The network check failing (or a reconnect) stops the network while the node already has the tx.
