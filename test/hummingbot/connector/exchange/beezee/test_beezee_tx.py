@@ -14,6 +14,7 @@ from hummingbot.connector.exchange.beezee.beezee_tx import (
     gas_limit_from_simulation,
     msg_cancel_order,
     msg_create_order,
+    msg_fill_orders,
     msg_multi_swap,
 )
 
@@ -66,6 +67,31 @@ GOLDEN_SWAP_SIMULATION_TX = (
     "CgIIARgDEgAaAA=="
 )
 
+# A MsgFillOrders taking two BZE/USDC asks, then a MsgMultiSwap selling the BZE on the pool, in one tx (the arbitrage
+# shape of fill_orders_and_swap). `bzed tx decode` (v8.2.0) gives the JSON fixtures next to this file, and `bzed tx
+# encode` of that JSON gives these bytes back.
+GOLDEN_FILL_SWAP_TX = (
+    "CtkDCsYBChsvYnplLnRyYWRlYmluLk1zZ0ZpbGxPcmRlcnMSpgEKKmJ6ZTE5cmw0Y20yaG1yOGFmeTRrbGRweHozZmthNGpndXEw"
+    "YXB5cGtkehJJdWJ6ZS9pYmMvODFEQTUyOEY0QzU1NDYyMDhEMUQ1MEY4NEMyRDBCMzg4QjQ1RDM3QUEzNkZDQTYyMkEzQ0IyRDhF"
+    "RjAxNDgzOBoEc2VsbCISCgYwLjAwMDMSCDIwMDAwMDAwIhMKBzAuMDAwMzESCDEwMDAwMDAwCvYBChovYnplLnRyYWRlYmluLk1z"
+    "Z011bHRpU3dhcBLXAQoqYnplMTlybDRjbTJobXI4YWZ5NGtsZHB4ejNma2E0amd1cTBhcHlwa2R6EklpYmMvODFEQTUyOEY0QzU1"
+    "NDYyMDhEMUQ1MEY4NEMyRDBCMzg4QjQ1RDM3QUEzNkZDQTYyMkEzQ0IyRDhFRjAxNDgzOF91YnplGhAKBHViemUSCDMwMDAwMDAw"
+    "IkwKRGliYy84MURBNTI4RjRDNTU0NjIwOEQxRDUwRjg0QzJEMEIzODhCNDVEMzdBQTM2RkNBNjIyQTNDQjJEOEVGMDE0ODM4EgQ5"
+    "MDAwEhVoYm90LWZpbGwtc3dhcDpnb2xkZW4SZgpQCkYKHy9jb3Ntb3MuY3J5cHRvLnNlY3AyNTZrMS5QdWJLZXkSIwohAk9OKtmc"
+    "NNYLm6YoPJQxqEGK+GcyEpYfl6d7Y3f80FtiEgQKAggBGAMSEgoMCgR1YnplEgQzMDAwEOCnEhpALZsWBEX+b+xDOo3UEbDQI+v1"
+    "2zej57QqJM6zIh+BV/IY7Ri3w61GmMKHdmxDBOdDGz9sHct+dl+leYgrHfdfpA=="
+)
+GOLDEN_FILL_SWAP_SIMULATION_TX = (
+    "CtkDCsYBChsvYnplLnRyYWRlYmluLk1zZ0ZpbGxPcmRlcnMSpgEKKmJ6ZTE5cmw0Y20yaG1yOGFmeTRrbGRweHozZmthNGpndXEw"
+    "YXB5cGtkehJJdWJ6ZS9pYmMvODFEQTUyOEY0QzU1NDYyMDhEMUQ1MEY4NEMyRDBCMzg4QjQ1RDM3QUEzNkZDQTYyMkEzQ0IyRDhF"
+    "RjAxNDgzOBoEc2VsbCISCgYwLjAwMDMSCDIwMDAwMDAwIhMKBzAuMDAwMzESCDEwMDAwMDAwCvYBChovYnplLnRyYWRlYmluLk1z"
+    "Z011bHRpU3dhcBLXAQoqYnplMTlybDRjbTJobXI4YWZ5NGtsZHB4ejNma2E0amd1cTBhcHlwa2R6EklpYmMvODFEQTUyOEY0QzU1"
+    "NDYyMDhEMUQ1MEY4NEMyRDBCMzg4QjQ1RDM3QUEzNkZDQTYyMkEzQ0IyRDhFRjAxNDgzOF91YnplGhAKBHViemUSCDMwMDAwMDAw"
+    "IkwKRGliYy84MURBNTI4RjRDNTU0NjIwOEQxRDUwRjg0QzJEMEIzODhCNDVEMzdBQTM2RkNBNjIyQTNDQjJEOEVGMDE0ODM4EgQ5"
+    "MDAwEhVoYm90LWZpbGwtc3dhcDpnb2xkZW4SVApQCkYKHy9jb3Ntb3MuY3J5cHRvLnNlY3AyNTZrMS5QdWJLZXkSIwohAk9OKtmc"
+    "NNYLm6YoPJQxqEGK+GcyEpYfl6d7Y3f80FtiEgQKAggBGAMSABoA"
+)
+
 
 class BeezeeTxTests(unittest.TestCase):
     def test_msg_create_order_contains_expected_type_url(self):
@@ -98,6 +124,13 @@ class BeezeeTxTests(unittest.TestCase):
         self.assertIn(b"/bze.tradebin.MsgMultiSwap", payload)
         self.assertIn(b"ubze_uusdc", payload)
         self.assertIn(b"990", payload)
+
+    def test_msg_fill_orders_contains_expected_type_url_and_entries(self):
+        payload = msg_fill_orders("bze1test", "ubze/uusdc", "buy", [("0.5", "1000"), ("0.4", "2000")])
+
+        self.assertIn(b"/bze.tradebin.MsgFillOrders", payload)
+        self.assertIn(b"ubze/uusdc", payload)
+        self.assertLess(payload.index(b"0.5"), payload.index(b"0.4"))
 
     def test_build_broadcast_request_base64_encodes_payload(self):
         request = build_broadcast_request(b"abc")
@@ -215,6 +248,59 @@ class BeezeeSwapTxGoldenVectorTests(unittest.TestCase):
         )
         self.assertEqual(signed["body"], simulation["body"])
         self.assertEqual("hbot-swaps", signed["body"]["memo"])
+        self.assertEqual("3", signed["auth_info"]["signer_infos"][0]["sequence"])
+        self.assertEqual({"amount": [{"denom": "ubze", "amount": "3000"}], "gas_limit": "300000", "payer": "", "granter": ""}, signed["auth_info"]["fee"])
+        self.assertEqual({"amount": [], "gas_limit": "0", "payer": "", "granter": ""}, simulation["auth_info"]["fee"])
+        self.assertEqual(64, len(base64.b64decode(signed["signatures"][0])))
+        self.assertEqual([""], simulation["signatures"])
+
+
+class BeezeeFillTxGoldenVectorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.signer = BeezeeSigner(TEST_MNEMONIC_PRIVATE_KEY, "bze")
+        self.messages = [
+            msg_fill_orders(self.signer.address, f"ubze/{USDC}", "sell", [("0.0003", "20000000"), ("0.00031", "10000000")]),
+            msg_multi_swap(self.signer.address, [USDC_BZE_POOL], "ubze", "30000000", USDC, "9000"),
+        ]
+
+    def test_signed_fill_swap_transaction_matches_golden_vector(self):
+        tx_bytes = build_signed_transaction(
+            signer=self.signer,
+            chain_id="beezee-1",
+            account_number=7,
+            sequence=3,
+            messages=self.messages,
+            fee_denom="ubze",
+            fee_amount="3000",
+            gas_limit=300000,
+            memo="hbot-fill-swap:golden",
+        )
+
+        self.assertEqual(GOLDEN_FILL_SWAP_TX, base64.b64encode(tx_bytes).decode())
+
+    def test_fill_swap_simulation_transaction_matches_golden_vector(self):
+        tx_bytes = build_simulation_transaction(
+            self.signer.public_key_bytes, sequence=3, messages=self.messages, memo="hbot-fill-swap:golden"
+        )
+
+        self.assertEqual(GOLDEN_FILL_SWAP_SIMULATION_TX, base64.b64encode(tx_bytes).decode())
+
+    def test_golden_fill_swap_vectors_decode_as_expected_with_bzed(self):
+        signed = json.loads((FIXTURES / "golden_fill_swap_tx.bzed_decode.json").read_text())
+        simulation = json.loads((FIXTURES / "golden_fill_swap_simulation_tx.bzed_decode.json").read_text())
+
+        self.assertEqual(
+            [
+                {"@type": "/bze.tradebin.MsgFillOrders", "creator": self.signer.address, "market_id": f"ubze/{USDC}",
+                 "order_type": "sell", "orders": [{"price": "0.0003", "amount": "20000000"},
+                                                  {"price": "0.00031", "amount": "10000000"}]},
+                {"@type": "/bze.tradebin.MsgMultiSwap", "creator": self.signer.address, "routes": [USDC_BZE_POOL],
+                 "input": {"denom": "ubze", "amount": "30000000"}, "min_output": {"denom": USDC, "amount": "9000"}},
+            ],
+            signed["body"]["messages"],
+        )
+        self.assertEqual(signed["body"], simulation["body"])
+        self.assertEqual("hbot-fill-swap:golden", signed["body"]["memo"])
         self.assertEqual("3", signed["auth_info"]["signer_infos"][0]["sequence"])
         self.assertEqual({"amount": [{"denom": "ubze", "amount": "3000"}], "gas_limit": "300000", "payer": "", "granter": ""}, signed["auth_info"]["fee"])
         self.assertEqual({"amount": [], "gas_limit": "0", "payer": "", "granter": ""}, simulation["auth_info"]["fee"])
