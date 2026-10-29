@@ -1269,13 +1269,18 @@ class BeezeeExchange(ExchangePyBase):
 
     async def _resolve_restored_without_tx(self, height: int):
         """A restored order that has neither a tx nor an order id rests if the book holds an unclaimed order of ours
-        with its side and price and its amount or less (the difference is booked as one fill), else it fails."""
+        with its side and price and its amount or less (the difference is booked as one fill), else it fails. It stays
+        pending while a queued create of the same pair, side, price and amount is unsettled, since that create may own
+        the book order, and until a book read succeeds."""
         for client_order_id in list(self._restored_without_tx):
-            self._restored_without_tx.discard(client_order_id)
             order = self._order_tracker.fetch_tracked_order(client_order_id)
             if order is None or order.exchange_order_id:
+                self._restored_without_tx.discard(client_order_id)
+                continue
+            if any(self._is_same_order(order, message) for message in self._queued_creates.values()):
                 continue
             order_id, remaining = await self._unclaimed_order_on_book(order, partly_filled=True)
+            self._restored_without_tx.discard(client_order_id)
             if order_id is None:
                 self.logger().warning(
                     f"Beezee order {client_order_id} was saved before its create tx was known and no matching order of "
@@ -1308,6 +1313,12 @@ class BeezeeExchange(ExchangePyBase):
                     )
                 )
             self._update_order_state(order, self._open_state(order))
+
+    def _is_same_order(self, order: InFlightOrder, message: QueuedOrderMessage) -> bool:
+        other = self._order_tracker.fetch_tracked_order(message.client_order_id)
+        return other is not None and (other.trading_pair, other.trade_type, other.price, other.amount) == (
+            order.trading_pair, order.trade_type, order.price, order.amount
+        )
 
     async def _finish_cancel_without_outcome(self, message: QueuedOrderMessage, reason: str):
         self._queued_cancels.pop(message.client_order_id, None)

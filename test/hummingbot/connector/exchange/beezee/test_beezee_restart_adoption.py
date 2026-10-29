@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import re
 from decimal import Decimal
 from test.hummingbot.connector.exchange.beezee.test_beezee_order_batching import BeezeeBatchingTestCase, SentMessage
 from test.hummingbot.connector.exchange.beezee.test_beezee_order_tracking import (
@@ -310,6 +312,38 @@ class BeezeeRestoredWithoutTxTests(RestartedPmmTestCase):
             [[(m.kind, m.market_id, m.order_id) for m in sent.messages] for _, sent in self.node.landed],
         )
         await self._run_until(lambda: "OID-FOUND" in self._event_ids(MarketEvent.OrderCancelled), "not cancelled")
+
+    async def test_order_is_resolved_on_the_next_update_after_a_failed_book_read(self):
+        self.mock_api.get(
+            re.compile(rf"^{re.escape(REST_URL + CONSTANTS.MARKET_ORDER_PATH_URL)}\?.*order_id={self.BOOK_ID}.*$"),
+            status=500, payload={"code": 13, "message": "internal error"},
+        )
+        self._book_order(self.BOOK_ID, "10000000")
+        await self._restart_without_tx([self._unsent("OID-RETRY")])
+        self.assertEqual((None, OrderState.PENDING_CREATE), (self._exchange_id("OID-RETRY"), self._state("OID-RETRY")))
+
+        await self._status_update()
+        await self._settle()
+
+        self.assertEqual((self.BOOK_ID, OrderState.OPEN), (self._exchange_id("OID-RETRY"), self._state("OID-RETRY")))
+
+    async def test_book_order_goes_to_the_queued_create_with_a_known_tx(self):
+        # A restored create with its tx hash, whose tx lookup is still in flight, and an order of the same values
+        # without a tx: the book order is the queued create's, so the order without a tx fails.
+        self._book_order(self.BOOK_ID, "10000000")
+        queued = self._unsent("OID-QUEUED")
+        queued.exchange_order_id = "CD" * 32
+        self.node.block_gate = asyncio.get_event_loop().create_future()
+        await self._restart_without_tx([queued, self._unsent("OID-UNSENT")])
+        self.assertEqual([], self._event_ids(MarketEvent.OrderFailure))
+
+        self.node.block_gate.set_result(None)
+        await self._run_until(lambda: self._exchange_id("OID-QUEUED") == self.BOOK_ID, "queued create not settled")
+        await self._status_update()
+        await self._settle()
+
+        self.assertEqual(OrderState.OPEN, self._state("OID-QUEUED"))
+        self.assertEqual(["OID-UNSENT"], self._event_ids(MarketEvent.OrderFailure))
 
     async def test_partly_filled_book_order_is_taken_with_the_missed_fill(self):
         self._book_order(self.BOOK_ID, "6000000")
