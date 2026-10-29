@@ -9,11 +9,11 @@ from test.hummingbot.connector.exchange.beezee.test_beezee_order_batching import
 )
 from test.hummingbot.connector.exchange.beezee.test_beezee_order_tracking import (
     ADDRESS,
-    H,
     OTHER_ADDRESS,
     REST_URL,
     USDC,
     BeezeeChainTestCase,
+    H,
     tx,
     tx_event,
 )
