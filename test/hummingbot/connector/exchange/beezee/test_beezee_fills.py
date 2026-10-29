@@ -21,11 +21,7 @@ from test.hummingbot.connector.exchange.beezee.test_beezee_order_tracking import
     create_message,
     tx,
 )
-from test.hummingbot.connector.exchange.beezee.test_beezee_swaps import (
-    POOL_ID,
-    BeezeeSwapTestCase,
-    swap_event,
-)
+from test.hummingbot.connector.exchange.beezee.test_beezee_swaps import POOL_ID, BeezeeSwapTestCase, swap_event
 from typing import Any, Dict, List, Optional
 
 from yarl import URL
