@@ -1,0 +1,1116 @@
+{
+  "_comment": [
+    "Expected swap results for the pools in amm_all_liquidity_pools_mainnet.json (recorded from mainnet REST",
+    "/bze/tradebin/all_liquidity_pools on 2026-10-29). Produced once by a throwaway Go test in the bze chain repo at",
+    "tag v8.2.0 (x/tradebin/keeper, gomock bank/account keepers): kind 'swap' runs the real MsgMultiSwap msg server",
+    "on a one-pool route from the recorded reserves and records the output amount; kind 'input_for_output' calls",
+    "keeper.CalculateOptimalInputForOutput for the output amount. 'error' is the chain's error where it refused.",
+    "Amounts are in chain base units."
+  ],
+  "cases": [
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "1",
+      "error": "swap failed on pool factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "499",
+      "error": "swap failed on pool factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "500",
+      "result": "624"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "999",
+      "result": "1249"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "1000",
+      "result": "1249"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "1001",
+      "result": "1250"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "12345",
+      "result": "15421"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "1000000",
+      "result": "1249099"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "123456789",
+      "result": "154198337"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "10000000000",
+      "result": "12415522317"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "164157453660",
+      "result": "186442191385"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "547191512200",
+      "result": "512879244835"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "1641574536600",
+      "result": "1026271882308"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "11491021756200",
+      "result": "1797325137235"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "1",
+      "result": "1"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "1000",
+      "result": "801"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "123456",
+      "result": "98836"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "1000000",
+      "result": "800577"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "2054600421",
+      "result": "1646510776"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "684866807231",
+      "result": "822432132564"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "1027300210847",
+      "result": "1644864265129"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "2054600421694",
+      "result": "3379538812766024686373147"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "output_denom": "ubze",
+      "amount": "2054600421695",
+      "error": "desired output 2054600421695 exceeds available reserve 2054600421695"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "1",
+      "error": "swap failed on pool factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "499",
+      "error": "swap failed on pool factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "500",
+      "result": "398"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "999",
+      "result": "797"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "1000",
+      "result": "797"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "1001",
+      "result": "798"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "12345",
+      "result": "9844"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "1000000",
+      "result": "797376"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "123456789",
+      "result": "98435717"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "10000000000",
+      "result": "7935226791"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "205460042169",
+      "result": "148962664805"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "684866807231",
+      "result": "409777735749"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "2054600421695",
+      "result": "819965659422"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "14382202951865",
+      "result": "1436017995578"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "1",
+      "result": "2"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "1000",
+      "result": "1255"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "123456",
+      "result": "154828"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "1000000",
+      "result": "1254113"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "1641574536",
+      "result": "2060778636"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "547191512200",
+      "result": "1029358928705"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "820787268300",
+      "result": "2058717857410"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "1641574536599",
+      "result": "3379538812765610832780867"
+    },
+    {
+      "pool_id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "amount": "1641574536600",
+      "error": "desired output 1641574536600 exceeds available reserve 1641574536600"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "1",
+      "error": "swap failed on pool factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "499",
+      "error": "swap failed on pool factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "500",
+      "result": "2"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "999",
+      "result": "4"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "1000",
+      "result": "4"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "1001",
+      "result": "4"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "12345",
+      "result": "54"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "1000000",
+      "result": "4377"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "123456789",
+      "result": "540415"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "10000000000",
+      "result": "43635109"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "310393002911",
+      "result": "1235459206"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "1034643343038",
+      "result": "3398594386"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "3103930029116",
+      "result": "6800590769"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "21727510203812",
+      "result": "11909975269"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "1",
+      "result": "229"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "1000",
+      "result": "228439"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "123456",
+      "result": "28202392"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "1000000",
+      "result": "228455542"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "13614809",
+      "result": "3113263370"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "4538269992",
+      "result": "1555075164717"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "6807404988",
+      "result": "3110150329319"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "13614809976",
+      "result": "42344105736687862987191"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "output_denom": "ubze",
+      "amount": "13614809977",
+      "error": "desired output 13614809977 exceeds available reserve 13614809977"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "1",
+      "error": "swap failed on pool factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "499",
+      "error": "swap failed on pool factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "500",
+      "result": "113762"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "999",
+      "result": "227525"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "1000",
+      "result": "227525"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "1001",
+      "result": "227753"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "12345",
+      "result": "2808962"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "1000000",
+      "result": "227509243"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "123456789",
+      "result": "27837696996"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "10000000000",
+      "result": "1312882863679"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "1361480997",
+      "result": "281662317664"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "4538269992",
+      "result": "774817951323"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "13614809977",
+      "result": "1550411496079"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "95303669839",
+      "result": "2715258600478"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "1",
+      "result": "1"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "1000",
+      "result": "5"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "123456",
+      "result": "543"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "1000000",
+      "result": "4396"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "3103930029",
+      "result": "13655750"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "1034643343038",
+      "result": "6821047083"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "1551965014558",
+      "result": "13642094166"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "3103930029115",
+      "result": "42344105739784371222801"
+    },
+    {
+      "pool_id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "amount": "3103930029116",
+      "error": "desired output 3103930029116 exceeds available reserve 3103930029116"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "1",
+      "error": "swap failed on pool ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "499",
+      "error": "swap failed on pool ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "500",
+      "error": "swap failed on pool ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "999",
+      "error": "swap failed on pool ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "1000",
+      "result": "2977688"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "1001",
+      "result": "2980668"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "12345",
+      "result": "36760403"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "1000000",
+      "result": "2976373376"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "123456789",
+      "result": "348587519422"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "10000000000",
+      "result": "5492298770407"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "225937736",
+      "result": "611666882357"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "753125787",
+      "result": "1682351594670"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "2259377361",
+      "result": "3365544783564"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "15815641527",
+      "result": "5891913943807"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "1",
+      "result": "1"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "1000",
+      "result": "1"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "123456",
+      "result": "42"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "1000000",
+      "result": "336"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "6734458480",
+      "result": "2263903"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "2244819493429",
+      "result": "1130819500"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "3367229240144",
+      "result": "2261639000"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "6734458480287",
+      "result": "15230913942897810393000"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "output_denom": "ubze",
+      "amount": "6734458480288",
+      "error": "desired output 6734458480288 exceeds available reserve 6734458480288"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "1",
+      "error": "swap failed on pool ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "499",
+      "error": "swap failed on pool ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "500",
+      "error": "swap failed on pool ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "999",
+      "error": "swap failed on pool ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze: amount is too low to be traded: invalid pool swap"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "1000",
+      "error": "swap failed on pool ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze: non positive output on swap tokens: invalid pool swap"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "1001",
+      "error": "swap failed on pool ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze: non positive output on swap tokens: invalid pool swap"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "12345",
+      "result": "4"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "1000000",
+      "result": "335"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "123456789",
+      "result": "41376"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "10000000000",
+      "result": "3346630"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "673445848028",
+      "result": "205211199"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "2244819493429",
+      "result": "564420601"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "6734458480288",
+      "result": "1129123553"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "swap",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "47141209362016",
+      "result": "1976707855"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "1",
+      "result": "2984"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "1000",
+      "result": "2983656"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "123456",
+      "result": "368370083"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "1000000",
+      "result": "2984974875"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "2259377",
+      "result": "6747946549"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "753125787",
+      "result": "3370599839984"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "1129688680",
+      "result": "6741199674001"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "2259377360",
+      "result": "15230913936158872352033"
+    },
+    {
+      "pool_id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "kind": "input_for_output",
+      "input_denom": "ubze",
+      "output_denom": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "amount": "2259377361",
+      "error": "desired output 2259377361 exceeds available reserve 2259377361"
+    }
+  ]
+}
