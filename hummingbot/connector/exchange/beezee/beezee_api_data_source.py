@@ -20,6 +20,7 @@ from hummingbot.connector.exchange.beezee.beezee_tx import (
     gas_limit_from_simulation,
     msg_cancel_order,
     msg_create_order,
+    msg_multi_swap,
 )
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeMarket,
@@ -494,6 +495,12 @@ class BeezeeAPIDataSource:
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required for cancels.")
         return msg_cancel_order(self._signer.address, market_id, order_id, order_type)
+
+    def multi_swap_message(self, pool_id: str, input_denom: str, input_amount: int, output_denom: str, min_output_amount: int) -> bytes:
+        """A MsgMultiSwap on the single pool `pool_id`. Amounts are in base units."""
+        if self._signer is None:
+            raise ValueError("Beezee wallet mode is required for swaps.")
+        return msg_multi_swap(self._signer.address, [pool_id], input_denom, str(input_amount), output_denom, str(min_output_amount))
 
     async def broadcast_create_order(self, market: BeezeeMarket, order_type: str, amount: Decimal, price: Decimal, memo: str = "") -> Dict[str, Any]:
         message = self.create_order_message(market, order_type, amount, price)

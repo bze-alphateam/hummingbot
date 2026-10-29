@@ -1,14 +1,27 @@
 import asyncio
+import json
 import re
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hummingbot.connector.constants import s_decimal_NaN
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS, beezee_web_utils as web_utils
-from hummingbot.connector.exchange.beezee.beezee_amm import BeezeePool, BeezeePoolTracker, BeezeeSwapQuote
+from hummingbot.connector.exchange.beezee.beezee_amm import (
+    BeezeePool,
+    BeezeePoolTracker,
+    BeezeeSwapError,
+    BeezeeSwapQuote,
+    BeezeeSwapRequest,
+    BeezeeSwapResult,
+    apply_swap,
+    min_output_after_slippage,
+    quote_swap as pool_quote_swap,
+    swap_fee_amount,
+    swap_output,
+)
 from hummingbot.connector.exchange.beezee.beezee_api_data_source import (
     BeezeeAPIDataSource,
     BeezeeTxRefusedError,
@@ -36,6 +49,7 @@ from hummingbot.connector.exchange.beezee.beezee_utils import (
 )
 from hummingbot.connector.exchange_py_base import ExchangePyBase
 from hummingbot.connector.trading_rule import TradingRule
+from hummingbot.connector.utils import get_new_client_order_id
 from hummingbot.core.data_type.common import OrderType, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState, OrderUpdate, TradeUpdate
 from hummingbot.core.data_type.limit_order import LimitOrder
@@ -81,6 +95,44 @@ class QueuedOrderMessage:
     @classmethod
     def from_json(cls, data: Dict[str, Any]) -> "QueuedOrderMessage":
         return cls(**{key: data.get(key) for key in cls.__dataclass_fields__})
+
+
+@dataclass
+class PendingSwap:
+    """A swap sent (or about to be sent) in a MsgMultiSwap, followed until its tx is found.
+
+    Swaps settle inside their tx: the tx result holds one SwapEvent per message, in message order.
+    """
+
+    client_order_id: str
+    trading_pair: str
+    side: str
+    pool_id: str
+    input_denom: str
+    output_denom: str
+    # The pool fee rate the swap was quoted with: the SwapEvent carries the full input, not the fee.
+    pool_fee: str
+    msg_index: int = 0
+    tx_hash: Optional[str] = None
+
+    def to_json(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_json(cls, data: Dict[str, Any]) -> "PendingSwap":
+        return cls(**{key: data.get(key) for key in cls.__dataclass_fields__ if key in data})
+
+
+@dataclass
+class PreparedSwap:
+    """A swap checked up front, with its message, waiting to be tracked and sent."""
+
+    request: BeezeeSwapRequest
+    market: BeezeeMarket
+    quote: BeezeeSwapQuote
+    min_output_amount: int
+    message: bytes
+    pending: PendingSwap
 
 
 class BeezeeExchange(ExchangePyBase):
@@ -163,6 +215,13 @@ class BeezeeExchange(ExchangePyBase):
         self._order_progress = asyncio.Event()
         # The messages of one batch tx share one tx lookup.
         self._tx_fetch_tasks: Dict[str, asyncio.Task] = {}
+        # Swaps by client order id, from their send until their tx result is read.
+        self._pending_swaps: Dict[str, PendingSwap] = {}
+        # One task per swap tx: sending it, then reading its result (keyed by the first swap's client order id).
+        self._swap_tasks: Dict[str, asyncio.Task] = {}
+        self._swap_results: "OrderedDict[str, BeezeeSwapResult]" = OrderedDict()
+        # Swaps restored from a saved state, followed again on the next status update.
+        self._swaps_to_resume: Set[str] = set()
         self._order_batcher = BeezeeOrderBatcher(
             send=self._send_order_batch,
             sleep=lambda delay: self._sleep(delay),
@@ -310,6 +369,338 @@ class BeezeeExchange(ExchangePyBase):
         """The swap that receives at least `amount` of the output token: base on a "buy", quote on a "sell"."""
         return self._build_pool_tracker().quote_input_for_output(trading_pair, side, amount)
 
+    # === Pool swaps ===
+    #
+    # A swap is a MsgMultiSwap on the pair's single pool. It settles inside its tx (no order queue), so it is tracked
+    # as a market order that fills at once: PENDING_CREATE until the tx is accepted, OPEN (exchange id = tx hash) until
+    # the tx is found, then one taker fill and FILLED, or FAILED with the chain's error. Nothing is retried. Swap txs
+    # go through the same simulate/sign/broadcast path as the order batches, which hands out the account sequences
+    # one tx at a time.
+
+    def amm_swap(self, trading_pair: str, side: str, amount: Decimal, slippage_pct: Decimal) -> str:
+        """Swaps `amount` of the input token (display units: quote on a "buy", base on a "sell") on the pair's pool.
+
+        The chain refuses the swap when it would pay out less than the quote minus `slippage_pct` percent. Returns the
+        client order id; the outcome arrives as order events (OrderFilled + completed, or OrderFailure). Raises
+        BeezeeSwapError, sending nothing, when the swap is refused up front: no pool, a halted pool, an amount the
+        pool cannot swap, a zero output after slippage, or a balance too low.
+        """
+        return self.amm_swaps([BeezeeSwapRequest(trading_pair, side, Decimal(amount), Decimal(slippage_pct))])[0]
+
+    def amm_swaps(self, swaps: List[BeezeeSwapRequest]) -> List[str]:
+        """Several swaps in one tx (one MsgMultiSwap each), executed in list order, e.g. both legs of a round trip.
+
+        Each swap is quoted on the pool as the swaps before it in the list leave it. Returns one client order id per
+        swap. Refused up front as a whole (BeezeeSwapError, nothing sent) when any swap is; on chain the tx fails as a
+        whole too, so every swap of it fails with the same error.
+        """
+        if self._signer is None:
+            raise BeezeeSwapError("Beezee wallet mode is required for swaps.")
+        if not swaps:
+            return []
+        prepared = self._prepare_swaps(swaps)
+        for swap in prepared:
+            base_amount = swap.quote.output if swap.request.side == CONSTANTS.SIDE_BUY else swap.quote.input
+            self.start_tracking_order(
+                order_id=swap.pending.client_order_id,
+                exchange_order_id=None,
+                trading_pair=swap.request.trading_pair,
+                trade_type=TradeType.BUY if swap.request.side == CONSTANTS.SIDE_BUY else TradeType.SELL,
+                price=swap.quote.effective_price,
+                amount=base_amount,
+                order_type=OrderType.MARKET,
+            )
+            self._pending_swaps[swap.pending.client_order_id] = swap.pending
+        key = prepared[0].pending.client_order_id
+        self._swap_tasks[key] = safe_ensure_future(self._send_swaps(key, prepared))
+        return [swap.pending.client_order_id for swap in prepared]
+
+    def get_swap_result(self, client_order_id: str) -> Optional[BeezeeSwapResult]:
+        """What a settled swap put in and got out (one of the last SWAP_RESULTS_KEPT), or None."""
+        return self._swap_results.get(client_order_id)
+
+    def _prepare_swaps(self, requests: List[BeezeeSwapRequest]) -> List[PreparedSwap]:
+        tracker = self._build_pool_tracker()
+        data_source = self._build_data_source()
+        # Pools as the swaps before in the list leave them, and the balances they leave (display units by symbol).
+        pools: Dict[str, BeezeePool] = {}
+        balances: Dict[str, Decimal] = {}
+        taker_fee = self._trade_fees.get("taker")
+        prepared: List[PreparedSwap] = []
+        for index, request in enumerate(requests):
+            if request.side not in (CONSTANTS.SIDE_BUY, CONSTANTS.SIDE_SELL):
+                raise BeezeeSwapError(f"side must be '{CONSTANTS.SIDE_BUY}' or '{CONSTANTS.SIDE_SELL}', got {request.side!r}")
+            market = tracker.market(request.trading_pair)
+            pool = tracker.get_pool(request.trading_pair)
+            if market is None or pool is None:
+                raise BeezeeSwapError(f"no liquidity pool for {request.trading_pair}")
+            halt_reason = self._halt_reason(market)
+            if pool.halted or halt_reason is not None:
+                raise BeezeeSwapError(f"pool {pool.pool_id} is halted ({halt_reason or 'halted denom'})")
+            pool = pools.get(pool.pool_id, pool)
+            quote = pool_quote_swap(pool, market, request.side, request.amount)
+            if not quote.ok:
+                raise BeezeeSwapError(f"{request.trading_pair} {request.side} of {request.amount}: {quote.error}")
+            min_output_amount = min_output_after_slippage(quote.output_amount, request.slippage_pct)
+            if min_output_amount <= 0:
+                raise BeezeeSwapError(
+                    f"{request.trading_pair} {request.side} of {request.amount}: the output after "
+                    f"{request.slippage_pct}% slippage rounds to 0"
+                )
+            input_token, output_token = (market.quote, market.base) if request.side == CONSTANTS.SIDE_BUY else (market.base, market.quote)
+            for symbol in (input_token.symbol, output_token.symbol) + ((taker_fee.token,) if taker_fee else ()):
+                balances.setdefault(symbol, self.get_available_balance(symbol))
+            balances[input_token.symbol] -= quote.input
+            if taker_fee is not None:
+                balances[taker_fee.token] -= taker_fee.amount
+            spent = dict.fromkeys([input_token.symbol] + ([taker_fee.token] if taker_fee else []))
+            short = [symbol for symbol in spent if balances[symbol] < 0]
+            if short:
+                needed = f"{quote.input} {input_token.symbol}" + (f" + {taker_fee.amount} {taker_fee.token} taker fee" if taker_fee else "")
+                raise BeezeeSwapError(
+                    f"{request.trading_pair} {request.side}: balance too low for {needed} "
+                    f"(short of {', '.join(f'{-balances[symbol]} {symbol}' for symbol in short)})"
+                )
+            # A later swap may spend this one's output, but only what the chain guarantees.
+            balances[output_token.symbol] += chain_amount_to_display(min_output_amount, output_token)
+            pools[pool.pool_id] = apply_swap(pool, swap_output(pool, quote.input_denom, quote.input_amount))
+            client_order_id = get_new_client_order_id(
+                is_buy=request.side == CONSTANTS.SIDE_BUY,
+                trading_pair=request.trading_pair,
+                hbot_order_id_prefix=self.client_order_id_prefix,
+                max_id_len=self.client_order_id_max_length,
+            )
+            prepared.append(PreparedSwap(
+                request=request,
+                market=market,
+                quote=quote,
+                min_output_amount=min_output_amount,
+                message=data_source.multi_swap_message(
+                    pool.pool_id, quote.input_denom, quote.input_amount, quote.output_denom, min_output_amount
+                ),
+                pending=PendingSwap(
+                    client_order_id=client_order_id,
+                    trading_pair=request.trading_pair,
+                    side=request.side,
+                    pool_id=pool.pool_id,
+                    input_denom=quote.input_denom,
+                    output_denom=quote.output_denom,
+                    pool_fee=format(pool.fee, "f"),
+                    msg_index=index,
+                ),
+            ))
+        return prepared
+
+    async def _send_swaps(self, key: str, swaps: List[PreparedSwap]):
+        try:
+            memo = f"hbot-swap:{swaps[0].pending.client_order_id}" if len(swaps) == 1 else CONSTANTS.SWAP_BATCH_MEMO
+            for swap in swaps:
+                self.logger().info(
+                    f"Beezee swap {swap.pending.client_order_id}: {swap.request.side} {swap.quote.input} "
+                    f"{swap.quote.input_denom} on pool {swap.pending.pool_id}, quoted {swap.quote.output}, "
+                    f"min_output {swap.min_output_amount} {swap.quote.output_denom}"
+                )
+            try:
+                response = await self._build_data_source().simulate_sign_and_broadcast(
+                    [swap.message for swap in swaps], memo=memo
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if isinstance(error, BeezeeTxRefusedError):
+                    if error.is_denom_halted:
+                        for market in {swap.market.market_id: swap.market for swap in swaps}.values():
+                            await self._mark_market_halted_by_chain(market)
+                    message = error.chain_message
+                else:
+                    message = str(error)
+                for swap in swaps:
+                    self._fail_swap(swap.pending.client_order_id, f"Beezee swap failed: {message}", error)
+                return
+            tx_hash = response["tx_response"]["txhash"]
+            self.logger().info(f"Beezee swap tx {tx_hash} submitted with {len(swaps)} swap(s).")
+            for swap in swaps:
+                swap.pending.tx_hash = tx_hash
+                order = self._order_tracker.fetch_tracked_order(swap.pending.client_order_id)
+                if order is not None:
+                    order.update_exchange_order_id(tx_hash)
+                    self._update_order_state(order, OrderState.OPEN)
+            await self._follow_swap_tx(tx_hash)
+        finally:
+            if self._swap_tasks.get(key) is asyncio.current_task():
+                del self._swap_tasks[key]
+
+    async def _follow_swap_tx(self, tx_hash: str):
+        for delay in CONSTANTS.TX_LOOKUP_DELAYS:
+            await self._sleep(delay)
+            if not self._swaps_of_tx(tx_hash):
+                return
+            try:
+                tx = await self._fetch_tx(tx_hash)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self.logger().debug(f"Beezee swap tx {tx_hash} lookup failed, retrying: {error}")
+                continue
+            tx_response = (tx or {}).get("tx_response")
+            if tx_response:
+                await self._settle_swaps(tx_hash, tx_response)
+                return
+        waited = int(sum(CONSTANTS.TX_LOOKUP_DELAYS))
+        for swap in self._swaps_of_tx(tx_hash):
+            self._fail_swap(
+                swap.client_order_id,
+                f"Beezee swap tx {tx_hash} was not found within {waited} s. It may still land: the balances are read "
+                f"again from the chain.",
+            )
+        safe_ensure_future(self._update_balances())
+
+    def _swaps_of_tx(self, tx_hash: str) -> List[PendingSwap]:
+        return sorted(
+            (swap for swap in self._pending_swaps.values() if swap.tx_hash == tx_hash), key=lambda swap: swap.msg_index
+        )
+
+    async def _settle_swaps(self, tx_hash: str, tx_response: Dict[str, Any]):
+        swaps = self._swaps_of_tx(tx_hash)
+        code = int(tx_response.get("code", 0))
+        if code != 0:
+            raw_log = tx_response.get("raw_log") or ""
+            if is_denom_halted_error(code, tx_response.get("codespace"), raw_log):
+                data_source = self._build_data_source()
+                for trading_pair in {swap.trading_pair for swap in swaps}:
+                    await self._mark_market_halted_by_chain(await data_source.get_market_by_trading_pair(trading_pair))
+            for swap in swaps:
+                self._fail_swap(swap.client_order_id, f"Beezee swap tx {tx_hash} failed with code {code}: {raw_log}")
+            return
+        swap_events = [
+            event for event in tx_tradebin_events(tx_response)
+            if event.type == CONSTANTS.SWAP_EVENT and event.get("creator") == self._account_address
+        ]
+        for swap in swaps:
+            event = swap_events[swap.msg_index] if swap.msg_index < len(swap_events) else None
+            coins = self._swap_event_coins(event) if event is not None else None
+            if coins is None or event.get("pool_id") != swap.pool_id or coins[0][0] != swap.input_denom or coins[1][0] != swap.output_denom:
+                self._fail_swap(
+                    swap.client_order_id,
+                    f"Beezee swap tx {tx_hash} has no matching SwapEvent for message {swap.msg_index}. The balances "
+                    f"are read again from the chain.",
+                )
+                safe_ensure_future(self._update_balances())
+                continue
+            await self._process_swap_fill(swap, tx_hash, coins[0][1], coins[1][1])
+        # The pool kept part of the fee, so its new reserves are read from the chain, never predicted.
+        await self._refresh_pools()
+
+    @staticmethod
+    def _swap_event_coins(event: TradebinEvent) -> Optional[Tuple[Tuple[str, int], Tuple[str, int]]]:
+        """((input denom, amount), (output denom, amount)) of a SwapEvent, or None when it cannot be read."""
+        try:
+            coins = tuple(json.loads(event.get(key)) for key in ("in", "out"))
+            return tuple((coin["denom"], int(coin["amount"])) for coin in coins)
+        except (TypeError, ValueError, KeyError):
+            return None
+
+    async def _process_swap_fill(self, swap: PendingSwap, tx_hash: str, input_amount: int, output_amount: int):
+        order = self._order_tracker.fetch_tracked_order(swap.client_order_id)
+        self._pending_swaps.pop(swap.client_order_id, None)
+        market = await self._build_data_source().get_market_by_trading_pair(swap.trading_pair)
+        is_buy = swap.side == CONSTANTS.SIDE_BUY
+        input_token, output_token = (market.quote, market.base) if is_buy else (market.base, market.quote)
+        pool_fee_amount = swap_fee_amount(Decimal(swap.pool_fee), input_amount)
+        # Reported before the pool fee, which is booked as a fee in the input token: what the pool swapped is the
+        # input after its fee, so the price is the pool's own and the fee is not counted twice.
+        swapped = chain_amount_to_display(input_amount - pool_fee_amount, input_token)
+        received = chain_amount_to_display(output_amount, output_token)
+        base_amount, quote_amount = (received, swapped) if is_buy else (swapped, received)
+        price = quote_amount / base_amount
+        pool_fee = chain_amount_to_display(pool_fee_amount, input_token)
+        taker_fee = self._trade_fees.get("taker")
+        flat_fees = ([TokenAmount(input_token.symbol, pool_fee)] if pool_fee_amount > 0 else []) + ([taker_fee] if taker_fee else [])
+        result = BeezeeSwapResult(
+            client_order_id=swap.client_order_id, trading_pair=swap.trading_pair, side=swap.side, tx_hash=tx_hash,
+            input_denom=swap.input_denom, output_denom=swap.output_denom,
+            input=chain_amount_to_display(input_amount, input_token), output=received, pool_fee=pool_fee, price=price,
+            input_amount=input_amount, output_amount=output_amount, pool_fee_amount=pool_fee_amount,
+        )
+        self._swap_results[swap.client_order_id] = result
+        while len(self._swap_results) > CONSTANTS.SWAP_RESULTS_KEPT:
+            self._swap_results.popitem(last=False)
+        # The swap's effect on the balances is known exactly from its event; the next balance poll confirms it.
+        for balances in (self._account_balances, self._account_available_balances):
+            balances[input_token.symbol] = balances.get(input_token.symbol, Decimal("0")) - result.input
+            balances[output_token.symbol] = balances.get(output_token.symbol, Decimal("0")) + received
+            if taker_fee is not None:
+                balances[taker_fee.token] = balances.get(taker_fee.token, Decimal("0")) - taker_fee.amount
+        self.logger().info(
+            f"Beezee swap {swap.client_order_id} settled in tx {tx_hash}: {result.input} {input_token.symbol} -> "
+            f"{received} {output_token.symbol} at {price} (pool fee {pool_fee} {input_token.symbol})."
+        )
+        if order is None:
+            return
+        # The base amount is only known now on a buy (and is the input after the pool fee on a sell).
+        order.amount = base_amount
+        self._order_tracker.process_trade_update(
+            TradeUpdate(
+                trade_id=f"{tx_hash}-{swap.msg_index}",
+                client_order_id=swap.client_order_id,
+                exchange_order_id=tx_hash,
+                trading_pair=swap.trading_pair,
+                fill_timestamp=self.current_timestamp,
+                fill_price=price,
+                fill_base_amount=base_amount,
+                fill_quote_amount=quote_amount,
+                fee=AddedToCostTradeFee(flat_fees=flat_fees),
+                is_taker=True,
+            )
+        )
+        self._update_order_state(order, OrderState.FILLED)
+
+    def _fail_swap(self, client_order_id: str, message: str, error: Optional[Exception] = None):
+        self._pending_swaps.pop(client_order_id, None)
+        self.logger().warning(f"Beezee swap {client_order_id} failed: {message}")
+        order = self._order_tracker.fetch_tracked_order(client_order_id)
+        if order is None:
+            return
+        update_task = self._order_tracker.process_order_update(
+            OrderUpdate(
+                trading_pair=order.trading_pair,
+                update_timestamp=self.current_timestamp,
+                new_state=OrderState.FAILED,
+                client_order_id=client_order_id,
+                exchange_order_id=order.exchange_order_id,
+                misc_updates={
+                    "error_message": message,
+                    "error_type": error.__class__.__name__ if error is not None else "BeezeeSwapFailed",
+                },
+            )
+        )
+        update_task.add_done_callback(self._report_order_progress)
+
+    def _resume_swaps(self):
+        """Follows the swaps restored from a saved state again: those with a tx hash from their tx; the others were
+        stopped before their tx was accepted, so whether they were sent is unknown and they fail."""
+        for client_order_id in list(self._swaps_to_resume):
+            self._swaps_to_resume.discard(client_order_id)
+            swap = self._pending_swaps.get(client_order_id)
+            if swap is None:
+                continue
+            if not swap.tx_hash:
+                self._fail_swap(
+                    client_order_id,
+                    "the connector stopped before its tx was accepted, so whether it was sent is unknown. The balances "
+                    "are read again from the chain.",
+                )
+                continue
+            if swap.tx_hash not in self._swap_tasks:
+                self._swap_tasks[swap.tx_hash] = safe_ensure_future(self._resume_swap_tx(swap.tx_hash))
+
+    async def _resume_swap_tx(self, tx_hash: str):
+        try:
+            await self._follow_swap_tx(tx_hash)
+        finally:
+            if self._swap_tasks.get(tx_hash) is asyncio.current_task():
+                del self._swap_tasks[tx_hash]
+
     def _schedule_pool_refresh(self):
         if not self._trading_pairs or (self._pool_refresh_task is not None and not self._pool_refresh_task.done()):
             return
@@ -390,6 +781,9 @@ class BeezeeExchange(ExchangePyBase):
     async def _place_cancel(self, order_id: str, tracked_order: InFlightOrder):
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required for cancels.")
+        if order_id in self._pending_swaps:
+            self.logger().info(f"Beezee swap {order_id} settles in its own tx and cannot be cancelled.")
+            return False
         # While a call waits for the order id or sends the cancel, the deferred-cancel retry leaves the order alone.
         self._cancels_in_progress[order_id] += 1
         try:
@@ -674,8 +1068,12 @@ class BeezeeExchange(ExchangePyBase):
             self._pool_refresh_task.cancel()
             self._pool_refresh_task = None
         tasks = list(self._tx_lookup_tasks.values()) + list(self._halt_cancel_tasks.values())
+        tasks += list(self._swap_tasks.values())
         for task in tasks + list(self._tx_fetch_tasks.values()) + list(self._deferred_cancel_tasks.values()):
             task.cancel()
+        self._swap_tasks.clear()
+        # The swaps not settled yet are followed again from their tx, like after a restart.
+        self._swaps_to_resume.update(self._pending_swaps)
         self._tx_lookup_tasks.clear()
         self._halt_cancel_tasks.clear()
         self._deferred_cancel_tasks.clear()
@@ -686,6 +1084,7 @@ class BeezeeExchange(ExchangePyBase):
         await self._update_halted_denoms_if_due()
         self._cancel_open_orders_on_halted_pairs()
         self._retry_deferred_cancels()
+        self._resume_swaps()
 
     async def _update_halted_denoms_if_due(self):
         if self._halted_denoms_loaded and time.time() - self._last_halted_denoms_refresh < CONSTANTS.HALTED_DENOMS_REFRESH_INTERVAL:
@@ -760,7 +1159,12 @@ class BeezeeExchange(ExchangePyBase):
         An order with a cancel task running or a cancel tx awaiting confirmation is skipped.
         """
         for order in list(self.in_flight_orders.values()):
-            if order.trading_pair not in self._halted_trading_pairs or order.is_done or order.is_pending_cancel_confirmation:
+            if (
+                order.trading_pair not in self._halted_trading_pairs
+                or order.is_done
+                or order.is_pending_cancel_confirmation
+                or order.client_order_id in self._pending_swaps
+            ):
                 continue
             running = self._halt_cancel_tasks.get(order.client_order_id)
             if running is not None and not running.done():
@@ -810,6 +1214,7 @@ class BeezeeExchange(ExchangePyBase):
             "creates": {client_order_id: message.to_json() for client_order_id, message in self._queued_creates.items()},
             "cancels": {client_order_id: message.to_json() for client_order_id, message in self._queued_cancels.items()},
             "fills_counted_through": dict(self._fills_counted_through),
+            "swaps": {client_order_id: swap.to_json() for client_order_id, swap in self._pending_swaps.items()},
         }
         return states
 
@@ -821,10 +1226,15 @@ class BeezeeExchange(ExchangePyBase):
         saved_creates = block_state.get("creates") or {}
         saved_cancels = block_state.get("cancels") or {}
         self._fills_counted_through = dict(block_state.get("fills_counted_through") or {})
+        saved_swaps = block_state.get("swaps") or {}
         for order in self.in_flight_orders.values():
             client_order_id = order.client_order_id
             exchange_order_id = order.exchange_order_id or ""
-            if client_order_id in saved_creates:
+            if client_order_id in saved_swaps:
+                # A swap settles in its tx: its outcome is read from that tx, never from the order book.
+                self._pending_swaps[client_order_id] = PendingSwap.from_json(saved_swaps[client_order_id])
+                self._swaps_to_resume.add(client_order_id)
+            elif client_order_id in saved_creates:
                 # Created but not yet saved by the chain: resume from the create tx.
                 self._queued_creates[client_order_id] = QueuedOrderMessage.from_json(saved_creates[client_order_id])
             elif len(exchange_order_id) == CONSTANTS.TX_HASH_LENGTH:

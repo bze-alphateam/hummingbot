@@ -8,7 +8,7 @@ The math mirrors chain v8.2.0 (`x/tradebin/keeper/service_amm.go`) to the micro-
 import asyncio
 import logging
 from dataclasses import dataclass, replace
-from decimal import Decimal, localcontext
+from decimal import ROUND_FLOOR, Decimal, localcontext
 from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple
 
 from hummingbot.connector.exchange.beezee.beezee_utils import (
@@ -156,10 +156,57 @@ class BeezeePoolSwap:
     output_amount: int
 
 
+def swap_fee_amount(fee: Decimal, amount: int) -> int:
+    """The pool fee taken from an input of `amount` at the fee rate `fee`, truncated as on chain."""
+    return dec_truncate_int(dec_mul(dec_from_int(amount), dec_from_str(format(fee, "f"))))
+
+
 def calculate_swap_input_and_fee(pool: BeezeePool, amount: int) -> Tuple[int, int]:
     """(input after the fee, fee): keeper.calculateSwapInputAndFee, the pool fee is taken from the input."""
-    fee_amount = dec_truncate_int(dec_mul(dec_from_int(amount), pool.fee_dec))
+    fee_amount = swap_fee_amount(pool.fee, amount)
     return amount - fee_amount, fee_amount
+
+
+def swap_fee_to_pool(pool: BeezeePool, fee_amount: int) -> int:
+    """The part of a swap's pool fee that stays in the pool: keeper.collectSwapFee sends the treasury and burner
+    shares away (each truncated from the whole fee) and leaves the rest to the liquidity providers."""
+    if fee_amount <= 0:
+        return 0
+    fee = dec_from_int(fee_amount)
+    remaining = fee_amount
+    treasury = dec_truncate_int(dec_mul(fee, dec_from_str(format(pool.fee_dest.get("treasury", Decimal(0)), "f"))))
+    if treasury > 0:
+        remaining -= treasury
+        if remaining <= 0:
+            return 0
+    burner = dec_truncate_int(dec_mul(fee, dec_from_str(format(pool.fee_dest.get("burner", Decimal(0)), "f"))))
+    if burner > 0:
+        remaining -= burner
+    return max(remaining, 0)
+
+
+def apply_swap(pool: BeezeePool, swap: BeezeePoolSwap) -> BeezeePool:
+    """The pool after `swap`, as keeper.swapTokens leaves it: the input reserve grows by the input after the fee plus
+    the fee share that stays in the pool, the output reserve shrinks by the output.
+
+    Only for quoting the next swaps of the same tx. The tracker never keeps a predicted pool: it re-reads the pool
+    from the chain after a swap.
+    """
+    added = swap.input_amount - swap.fee_amount + swap_fee_to_pool(pool, swap.fee_amount)
+    if swap.input_denom == pool.base:
+        return replace(pool, reserve_base=pool.reserve_base + added, reserve_quote=pool.reserve_quote - swap.output_amount)
+    return replace(pool, reserve_quote=pool.reserve_quote + added, reserve_base=pool.reserve_base - swap.output_amount)
+
+
+def min_output_after_slippage(output_amount: int, slippage_pct: Decimal) -> int:
+    """The swap's `min_output` in base units: output x (1 - slippage_pct / 100), rounded down, so the limit is never
+    tighter than the slippage asked for."""
+    if not Decimal(0) <= slippage_pct < Decimal(100):
+        raise BeezeeSwapError(f"slippage must be at least 0 and below 100 percent, got {slippage_pct}")
+    with localcontext() as context:
+        context.prec = PRICE_PRECISION_DIGITS
+        limit = Decimal(output_amount) * (Decimal(100) - slippage_pct) / Decimal(100)
+        return int(limit.to_integral_value(rounding=ROUND_FLOOR))
 
 
 def swap_output(pool: BeezeePool, input_denom: str, amount: int) -> BeezeePoolSwap:
@@ -323,6 +370,37 @@ def quote_input_for_output(pool: BeezeePool, market: BeezeeMarket, side: str, am
             output_denom=output_token.denom, halted=pool.halted, error=str(error),
         )
     return build_swap_quote(pool, market, side, required)
+
+
+@dataclass(frozen=True)
+class BeezeeSwapRequest:
+    """One swap for `BeezeeExchange.amm_swaps`: `amount` of the input token (display units; quote on a "buy", base on
+    a "sell") on the trading pair's pool, refused by the chain when it would pay out more than `slippage_pct` percent
+    less than quoted."""
+    trading_pair: str
+    side: str
+    amount: Decimal
+    slippage_pct: Decimal
+
+
+@dataclass(frozen=True)
+class BeezeeSwapResult:
+    """A settled swap, read from its SwapEvent. `input` is what left the wallet (the pool fee included), `output` what
+    arrived; `pool_fee` is the part of `input` the pool kept as its fee. `price` is quote per base before the pool fee,
+    the price the swap is reported at. The tradebin taker fee is paid on top, in the native token."""
+    client_order_id: str
+    trading_pair: str
+    side: str
+    tx_hash: str
+    input_denom: str
+    output_denom: str
+    input: Decimal
+    output: Decimal
+    pool_fee: Decimal
+    price: Decimal
+    input_amount: int
+    output_amount: int
+    pool_fee_amount: int
 
 
 # === Tracker ===

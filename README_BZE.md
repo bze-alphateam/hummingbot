@@ -289,6 +289,30 @@ The connector reads the tradebin liquidity pools (AMM) of the pairs it trades. N
   (`hummingbot.connector.exchange.beezee.beezee_pool_price_delegate`) is an asset price delegate that returns the
   pool price for every price type (a pool has no spread), NaN while there is none. A strategy or script that takes an
   `AssetPriceDelegate`, such as pure market making's `asset_price_delegate`, uses it in place of the order-book mid.
+- **Swaps.** `connector.amm_swap(trading_pair, side, amount, slippage_pct)` swaps `amount` of the input token (quote on
+  `"buy"`, base on `"sell"`, display units) on the pair's pool with one `MsgMultiSwap` (always that one pool, never a
+  route through other pools). `min_output` is the quoted output less `slippage_pct` percent, rounded down in base
+  units, so the chain refuses the swap ("the resulted amount is too low") rather than pay out less.
+  `connector.amm_swaps([BeezeeSwapRequest(trading_pair, side, amount, slippage_pct), ...])` puts several swaps in one
+  tx, executed in list order: a round trip (A→B then B→A) is two swaps, since one message cannot use the same pool
+  twice. Each swap is quoted on the pool as the swaps before it leave it, and a later swap may spend what an earlier
+  one is guaranteed to pay out. Gas is simulated and the tx signed, like the order batches; swap txs and order
+  batches from the same wallet take their account sequences one tx at a time.
+  - *Refused up front* (a `BeezeeSwapError`, nothing tracked, nothing sent): no pool or a halted one, an amount the
+    pool cannot swap (too small to pay any pool fee, or no output at all), an output that the slippage rounds to 0,
+    or an available balance too low for the input plus the taker fee (in BZE).
+  - *Tracked as taker trades.* Each swap is a market order with its own client order id: created once its tx is
+    accepted, then one fill and completed as soon as the tx is found (swaps settle inside their tx, no order queue).
+    The fill is read from the swap's `SwapEvent`: price in the pair's order-price units (quote per base), amounts
+    before the pool fee, and fees = the pool fee (in the input token) + the tradebin taker fee (0.1 BZE on mainnet,
+    read from the chain params, once per swap). So `OrderFilledEvent`, the trade history and PnL treat a swap like an
+    order fill. The balances change by the event's amounts at once, and the pool is read again from the chain (part
+    of the fee stays in the pool, so its new reserves are never guessed). `connector.get_swap_result(order_id)` gives
+    what a settled swap put in and got out.
+  - *Failures.* A tx refused in simulation (e.g. the slippage limit, a pool halted meanwhile) or failing in its block
+    fails every swap in it with the chain's error (`OrderFailure`); a halted refusal also re-reads the halted denoms.
+    A tx not found within 60 s fails too, and the balances are read again. Nothing is retried, and a swap cannot be
+    cancelled. A swap still waiting for its tx when the bot stops is settled from that tx after the restart.
   It is `ready` once the connector is ready and the pool has a price.
 
 ## Connector behaviour on chain v8.2.0
