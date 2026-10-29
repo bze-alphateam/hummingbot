@@ -667,6 +667,63 @@ class BeezeeOrderTrackingTests(BeezeeChainTestCase):
         self.assertEqual(Decimal("6"), self._order("OID-REST").executed_amount_base)
         self.assertEqual(OrderState.PARTIALLY_FILLED, self._state("OID-REST"))
 
+    LATEST = H + 5000
+
+    async def _restart_with_create_partly_filled_while_down(self, other_creates: Optional[Dict[str, Any]] = None):
+        """Killed right after the create tx; while down past the catch-up limit, another wallet took 500 of its 1200."""
+        pending = InFlightOrder(
+            client_order_id="OID-OLD", trading_pair="BZE-USDC", order_type=OrderType.LIMIT, trade_type=TradeType.SELL,
+            amount=Decimal("1200"), price=Decimal("0.0005"), creation_timestamp=1.0, exchange_order_id=RESTED_TX,
+            initial_state=OrderState.PENDING_CREATE,
+        )
+        orders, creates = [pending], {"OID-OLD": {
+            "client_order_id": "OID-OLD", "tx_hash": RESTED_TX, "msg_index": 0, "tx_height": H,
+            "message_id": "000000000000000000000000", "next_height": H + 1,
+        }}
+        for order, create in (other_creates or {}).values():
+            orders.append(order)
+            creates[order.client_order_id] = create
+        self._restore(orders, {"last_processed_height": H, "cancels": {}, "creates": creates})
+        self._mock_latest_height(self.LATEST, repeat=True)
+        self._mock_market_order("000000000000000006810895", "700000000", price="0.0005")
+        self._mock_user_orders(BZE_USDC, ["000000000000000006810895"], repeat=True)
+
+        await self._status_update()
+        await self._run_until(lambda: self._state("OID-OLD") == OrderState.PARTIALLY_FILLED, "not partly filled")
+        await self._drain()
+
+    async def test_create_partly_filled_during_long_downtime_takes_its_book_order_with_the_fill(self):
+        await self._restart_with_create_partly_filled_while_down()
+
+        self.assertEqual("000000000000000006810895", self._exchange_id("OID-OLD"))
+        self.assertEqual([], self._event_ids(MarketEvent.OrderFailure))
+        self.assertEqual([(f"reconcile-{self.LATEST}", Decimal("500"), Decimal("0.0005"))], [
+            (fill.exchange_trade_id, fill.amount, fill.price) for fill in self.events[MarketEvent.OrderFilled].event_log
+        ])
+
+    async def test_fill_already_in_the_book_amount_is_not_counted_again_when_its_block_is_read(self):
+        # A recent create makes the pass read the last blocks, which hold the 500 fill the book amount already shows.
+        recent = InFlightOrder(
+            client_order_id="OID-NEW", trading_pair="BZE-USDC", order_type=OrderType.LIMIT, trade_type=TradeType.BUY,
+            amount=Decimal("10"), price=Decimal("0.0003"), creation_timestamp=1.0, exchange_order_id=FILLED_TX,
+            initial_state=OrderState.PENDING_CREATE,
+        )
+        self._mock_blocks({self.LATEST - 1: block_results(self.LATEST - 1, [
+            block_event("OrderExecutedEvent", id="000000000000000006810895", market_id=BZE_USDC, order_type="sell",
+                        amount="500000000", price="0.0005", maker=ADDRESS, taker=OTHER_ADDRESS,
+                        message_id="000000000000000000000003"),
+        ])}, empty_up_to=self.LATEST)
+        await self._restart_with_create_partly_filled_while_down({"OID-NEW": (recent, {
+            "client_order_id": "OID-NEW", "tx_hash": FILLED_TX, "msg_index": 0, "tx_height": self.LATEST - 2,
+            "message_id": "000000000000000000000001", "next_height": self.LATEST - 1,
+        })})
+
+        self.assertEqual([self.LATEST - 1, self.LATEST], self._requested_heights())
+        self.assertEqual(Decimal("500"), self._order("OID-OLD").executed_amount_base)
+        self.assertEqual([f"reconcile-{self.LATEST}"], [
+            fill.exchange_trade_id for fill in self.events[MarketEvent.OrderFilled].event_log
+        ])
+
     async def test_order_gone_after_long_downtime_is_canceled_without_a_fill(self):
         self._restore([self._resting_buy()], {"last_processed_height": H, "creates": {}, "cancels": {}})
         self._mock_latest_height(H + 5000)

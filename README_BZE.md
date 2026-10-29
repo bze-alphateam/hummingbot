@@ -292,7 +292,9 @@ several ticks apart (see "Seeding the book"). Checks:
   `stop` right before the bot exited) is seen in its block. An order with no outcome within 20 blocks of its tx is marked
   failed. A partial fill whose rest the chain refunds ends `CANCELED` with its fills. After a restart, missed fills
   are read back from the last processed block (up to 1000 blocks); beyond that the connector reconciles resting
-  orders from the chain and logs a warning. The RPC endpoint must serve `/block_results` for recent heights.
+  orders from the chain and logs a warning. A create that far behind takes its unclaimed order on the book, even a
+  partly filled one (the difference booked as one fill), and fails only when the book has none. The RPC endpoint must
+  serve `/block_results` for recent heights.
 - **Restart with open orders.** After a crash, `docker kill` or a container restart, the bot keeps working with the
   previous run's orders instead of cancelling them, so the book never goes empty and no create fee is paid twice.
   Start the same strategy file again: the saved tracking state brings the orders back, and when the strategy starts,

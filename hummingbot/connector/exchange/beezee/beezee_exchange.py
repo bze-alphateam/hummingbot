@@ -977,7 +977,7 @@ class BeezeeExchange(ExchangePyBase):
             behind = f"its blocks are more than {CONSTANTS.MAX_BLOCK_CATCH_UP} behind the chain"
             for message in list(self._queued_creates.values()):
                 if message.tx_height is not None and message.next_height <= floor_height:
-                    await self._settle_create_from_book(message, behind)
+                    await self._settle_create_from_book(message, behind, latest_height)
             for message in list(self._queued_cancels.values()):
                 if message.tx_height is not None and message.next_height <= floor_height:
                     await self._finish_cancel_without_outcome(message, behind)
@@ -1020,7 +1020,7 @@ class BeezeeExchange(ExchangePyBase):
     async def _skip_unreadable_block(self, height: int, latest_height: int):
         reason = f"block {height} could not be read"
         for message in [message for message in self._queued_creates.values() if message.in_window(height)]:
-            await self._settle_create_from_book(message, reason)
+            await self._settle_create_from_book(message, reason, latest_height)
         for message in [message for message in self._queued_cancels.values() if message.in_window(height)]:
             await self._finish_cancel_without_outcome(message, reason)
         # The chain state right after the skipped block has the resting orders' exact fills through it; the next
@@ -1225,14 +1225,15 @@ class BeezeeExchange(ExchangePyBase):
         if order is not None:
             self._update_order_state(order, OrderState.FAILED)
 
-    async def _settle_create_from_book(self, message: QueuedOrderMessage, reason: str):
+    async def _settle_create_from_book(self, message: QueuedOrderMessage, reason: str, height: Optional[int] = None):
         """Settles a create whose outcome cannot be read from blocks: it rests if the book holds an order of ours with
-        its market, side, amount and price that no tracked order claims, else it fails."""
+        its market, side and price and its amount or less that no tracked order claims (the difference is booked as
+        one fill), else it fails."""
         self._queued_creates.pop(message.client_order_id, None)
         order = self._order_tracker.fetch_tracked_order(message.client_order_id)
         if order is None:
             return
-        order_id, _ = await self._unclaimed_order_on_book(order)
+        order_id, remaining = await self._unclaimed_order_on_book(order, partly_filled=True)
         if order_id is None:
             await self._finish_create_without_outcome(message, reason)
             return
@@ -1240,8 +1241,7 @@ class BeezeeExchange(ExchangePyBase):
             f"Beezee order {message.client_order_id}: {reason}, but a matching order of this account rests on the "
             f"book. Taking it as this order. exchange_order_id={order_id}, tx_hash={message.tx_hash}"
         )
-        order.update_exchange_order_id(order_id)
-        self._update_order_state(order, self._open_state(order))
+        await self._take_book_order(order, order_id, remaining, height)
 
     async def _unclaimed_order_on_book(
         self, order: InFlightOrder, partly_filled: bool = False
@@ -1292,27 +1292,37 @@ class BeezeeExchange(ExchangePyBase):
                 f"Beezee order {client_order_id} was saved before its create tx was known. A matching order of this "
                 f"account rests on the book: taking it as this order. exchange_order_id={order_id}"
             )
-            order.update_exchange_order_id(order_id)
-            missed_fill = order.amount - remaining - order.executed_amount_base
-            if missed_fill > Decimal("0"):
-                market = await self._build_data_source().get_market_by_trading_pair(order.trading_pair)
-                # Its fills so far are in the book amount, so block fills up to this height must not count again.
-                self._fills_counted_through[client_order_id] = height
-                self._order_tracker.process_trade_update(
-                    TradeUpdate(
-                        trade_id=f"reconcile-{height}",
-                        client_order_id=client_order_id,
-                        exchange_order_id=order_id,
-                        trading_pair=order.trading_pair,
-                        fill_timestamp=self.current_timestamp,
-                        fill_price=order.price,
-                        fill_base_amount=missed_fill,
-                        fill_quote_amount=missed_fill * order.price,
-                        fee=self._fill_fee(order, market, missed_fill, order.price, is_taker=False),
-                        is_taker=False,
-                    )
+            await self._take_book_order(order, order_id, remaining, height)
+
+    async def _take_book_order(
+        self, order: InFlightOrder, order_id: str, remaining: Decimal, height: Optional[int] = None
+    ):
+        """The order rests as the book order `order_id`; what the book order lost by `height` (the latest height when
+        not given) is booked as one fill."""
+        order.update_exchange_order_id(order_id)
+        missed_fill = order.amount - remaining - order.executed_amount_base
+        if missed_fill > Decimal("0"):
+            data_source = self._build_data_source()
+            if height is None:
+                height = await data_source.get_latest_block_height()
+            market = await data_source.get_market_by_trading_pair(order.trading_pair)
+            # Its fills so far are in the book amount, so block fills up to this height must not count again.
+            self._fills_counted_through[order.client_order_id] = height
+            self._order_tracker.process_trade_update(
+                TradeUpdate(
+                    trade_id=f"reconcile-{height}",
+                    client_order_id=order.client_order_id,
+                    exchange_order_id=order_id,
+                    trading_pair=order.trading_pair,
+                    fill_timestamp=self.current_timestamp,
+                    fill_price=order.price,
+                    fill_base_amount=missed_fill,
+                    fill_quote_amount=missed_fill * order.price,
+                    fee=self._fill_fee(order, market, missed_fill, order.price, is_taker=False),
+                    is_taker=False,
                 )
-            self._update_order_state(order, self._open_state(order))
+            )
+        self._update_order_state(order, self._open_state(order))
 
     def _is_same_order(self, order: InFlightOrder, message: QueuedOrderMessage) -> bool:
         other = self._order_tracker.fetch_tracked_order(message.client_order_id)
