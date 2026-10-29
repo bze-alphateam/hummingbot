@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 from decimal import Decimal
-from typing import TYPE_CHECKING, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
 from hummingbot.connector.exchange.beezee.beezee_order_book import BeezeeOrderBook
@@ -32,6 +32,20 @@ class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
         self._websocket_endpoint = websocket_endpoint
         self._last_books: Dict[str, Dict[str, str]] = {}
         self._seen_trade_ids: Dict[str, set] = {}
+        # The last book read per pair as the chain gave it: (price, amount) strings, best first. The OrderBook keeps
+        # floats, which cannot hold every 18-decimal chain price exactly, and a fill must name the price exactly.
+        self._chain_levels: Dict[str, Dict[str, List[Tuple[str, str]]]] = {}
+
+    def chain_levels(self, trading_pair: str) -> Optional[Dict[str, List[Tuple[str, str]]]]:
+        """{"bids": [...], "asks": [...]} of the last book read for the pair, in chain units, best price first."""
+        return self._chain_levels.get(trading_pair)
+
+    def _remember_levels(self, trading_pair: str, order_book: Dict[str, List[Dict[str, Any]]]):
+        def levels(side: str, best_first_descending: bool) -> List[Tuple[str, str]]:
+            rows = [(level["price"], level["amount"]) for level in order_book.get(side) or []]
+            return sorted(rows, key=lambda row: Decimal(row[0]), reverse=best_first_descending)
+
+        self._chain_levels[trading_pair] = {"bids": levels("bids", True), "asks": levels("asks", False)}
 
     async def get_last_traded_prices(self, trading_pairs: List[str], domain: Optional[str] = None) -> Dict[str, float]:
         prices: Dict[str, float] = {}
@@ -50,6 +64,7 @@ class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
     async def _order_book_snapshot(self, trading_pair: str) -> OrderBookMessage:
         market = await self._data_source.get_market_by_trading_pair(trading_pair)
         order_book = await self._data_source.get_order_book(market.market_id)
+        self._remember_levels(trading_pair, order_book)
         update_id = int(time.time() * 1e6)
         return BeezeeOrderBook.snapshot_message_from_exchange(trading_pair, market, order_book["bids"], order_book["asks"], update_id, time.time())
 
@@ -88,6 +103,7 @@ class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
         for trading_pair in list(self._trading_pairs):
             market = await self._data_source.get_market_by_trading_pair(trading_pair)
             order_book = await self._data_source.get_order_book(market.market_id)
+            self._remember_levels(trading_pair, order_book)
             bids = {level["price"]: level["amount"] for level in order_book["bids"]}
             asks = {level["price"]: level["amount"] for level in order_book["asks"]}
             serialized = {**bids, **{f"ask:{price}": amount for price, amount in asks.items()}}

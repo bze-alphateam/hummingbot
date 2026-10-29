@@ -42,6 +42,10 @@ LIQUIDITY_POOL_PATH_URL = "/bze/tradebin/liquidity_pool"
 # CometBFT RPC
 RPC_STATUS_PATH_URL = "/status"
 BLOCK_RESULTS_PATH_URL = "/block_results"
+ABCI_QUERY_PATH_URL = "/abci_query"
+# Raw store reads of the tradebin queue (chain v8.2.0 key layout: Qm/value/{market id}/{message id}/).
+TRADEBIN_STORE_QUERY_PATH = "/store/tradebin/key"
+QUEUE_MESSAGE_KEY_PREFIX = "Qm/value/"
 
 SIDE_BUY = "buy"
 SIDE_SELL = "sell"
@@ -56,6 +60,9 @@ ORDER_CANCEL_MESSAGE_EVENT = "bze.tradebin.OrderCancelMessageEvent"
 ORDER_EXECUTED_EVENT = "bze.tradebin.OrderExecutedEvent"
 ORDER_SAVED_EVENT = "bze.tradebin.OrderSavedEvent"
 ORDER_CANCELED_EVENT = "bze.tradebin.OrderCanceledEvent"
+# Chain v8.3.0 and later: the unexecuted part of a queued message was returned (reason no_match, unfilled_remainder
+# or below_min_amount). v8.2.0 emits nothing for it.
+ORDER_MESSAGE_REFUNDED_EVENT = "bze.tradebin.OrderMessageRefundedEvent"
 # Emitted by MsgMultiSwap for each pool it swaps on, in the tx itself (swaps do not go through the order queue).
 SWAP_EVENT = "bze.tradebin.SwapEvent"
 # A queued message's outcome is looked for in its tx block and the 19 blocks after it.
@@ -96,6 +103,12 @@ DEFAULT_BATCH_WINDOW_MS = 300
 DEFAULT_MAX_MESSAGES_PER_TX = 25
 BATCH_MEMO = "hbot-batch"
 SWAP_BATCH_MEMO = "hbot-swaps"
+FILL_MEMO = "hbot-fill"
+FILL_SWAP_MEMO = "hbot-fill-swap"
+# MsgFillOrders takes at most this many entries (chain ValidateBasic).
+MAX_FILL_ORDERS = 50
+# The chain refuses prices at or below this (chain prices, quote base units per base base unit).
+MIN_CHAIN_PRICE = Decimal("0.0000000001")
 # Settled swaps kept for `get_swap_result`, newest last.
 SWAP_RESULTS_KEPT = 1000
 # Legacy fixed gas limits, replaced by tx simulation. Still accepted (and ignored) in saved configs.

@@ -5,7 +5,7 @@ import time
 from collections import OrderedDict, defaultdict
 from dataclasses import asdict, dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from hummingbot.connector.constants import s_decimal_NaN
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS, beezee_web_utils as web_utils
@@ -31,6 +31,13 @@ from hummingbot.connector.exchange.beezee.beezee_api_order_book_data_source impo
 from hummingbot.connector.exchange.beezee.beezee_api_user_stream_data_source import BeezeeAPIUserStreamDataSource
 from hummingbot.connector.exchange.beezee.beezee_auth import BeezeeAuth
 from hummingbot.connector.exchange.beezee.beezee_events import TradebinEvent, block_tradebin_events, tx_tradebin_events
+from hummingbot.connector.exchange.beezee.beezee_fills import (
+    BeezeeFillEntry,
+    BeezeeFillError,
+    levels_to_take as book_levels_to_take,
+    prepare_fill_entries,
+    resting_side,
+)
 from hummingbot.connector.exchange.beezee.beezee_order_batcher import (
     BatchedOrderMessage,
     BeezeeCreateWithdrawnError,
@@ -80,6 +87,9 @@ class QueuedOrderMessage:
     message_id: Optional[str] = None
     # Next block to scan for the outcome.
     next_height: Optional[int] = None
+    # Fills only: the client order id of the first entry of its MsgFillOrders. A fill never rests: it settles once its
+    # queue message is processed, filled in part or in full and refunded for the rest.
+    fill_group: Optional[str] = None
 
     @property
     def last_height(self) -> int:
@@ -133,6 +143,15 @@ class PreparedSwap:
     min_output_amount: int
     message: bytes
     pending: PendingSwap
+
+
+@dataclass
+class PreparedFill:
+    """A MsgFillOrders checked up front, with its entries' tracked orders, waiting to be sent."""
+
+    market: BeezeeMarket
+    client_order_ids: List[str]
+    message: bytes
 
 
 class BeezeeExchange(ExchangePyBase):
@@ -222,6 +241,10 @@ class BeezeeExchange(ExchangePyBase):
         self._swap_results: "OrderedDict[str, BeezeeSwapResult]" = OrderedDict()
         # Swaps restored from a saved state, followed again on the next status update.
         self._swaps_to_resume: Set[str] = set()
+        # Fill entries' client order id -> the first entry of their MsgFillOrders (see "Taker fills").
+        self._fill_groups: Dict[str, str] = {}
+        self._fill_tasks: Dict[str, asyncio.Task] = {}
+        self._balance_refresh_task: Optional[asyncio.Task] = None
         self._order_batcher = BeezeeOrderBatcher(
             send=self._send_order_batch,
             sleep=lambda delay: self._sleep(delay),
@@ -399,6 +422,12 @@ class BeezeeExchange(ExchangePyBase):
         if not swaps:
             return []
         prepared = self._prepare_swaps(swaps)
+        client_order_ids = self._track_swaps(prepared)
+        key = client_order_ids[0]
+        self._swap_tasks[key] = safe_ensure_future(self._send_swaps(key, prepared))
+        return client_order_ids
+
+    def _track_swaps(self, prepared: List[PreparedSwap]) -> List[str]:
         for swap in prepared:
             base_amount = swap.quote.output if swap.request.side == CONSTANTS.SIDE_BUY else swap.quote.input
             self.start_tracking_order(
@@ -411,8 +440,6 @@ class BeezeeExchange(ExchangePyBase):
                 order_type=OrderType.MARKET,
             )
             self._pending_swaps[swap.pending.client_order_id] = swap.pending
-        key = prepared[0].pending.client_order_id
-        self._swap_tasks[key] = safe_ensure_future(self._send_swaps(key, prepared))
         return [swap.pending.client_order_id for swap in prepared]
 
     def get_swap_result(self, client_order_id: str) -> Optional[BeezeeSwapResult]:
@@ -491,9 +518,13 @@ class BeezeeExchange(ExchangePyBase):
             ))
         return prepared
 
-    async def _send_swaps(self, key: str, swaps: List[PreparedSwap]):
+    async def _send_swaps(self, key: str, swaps: List[PreparedSwap], fill: Optional[PreparedFill] = None):
+        """Sends the swaps in one tx, after the fill's MsgFillOrders when there is one (fill_orders_and_swap)."""
         try:
-            memo = f"hbot-swap:{swaps[0].pending.client_order_id}" if len(swaps) == 1 else CONSTANTS.SWAP_BATCH_MEMO
+            if fill is not None:
+                memo = f"{CONSTANTS.FILL_SWAP_MEMO}:{fill.client_order_ids[0]}"
+            else:
+                memo = f"hbot-swap:{swaps[0].pending.client_order_id}" if len(swaps) == 1 else CONSTANTS.SWAP_BATCH_MEMO
             for swap in swaps:
                 self.logger().info(
                     f"Beezee swap {swap.pending.client_order_id}: {swap.request.side} {swap.quote.input} "
@@ -502,22 +533,30 @@ class BeezeeExchange(ExchangePyBase):
                 )
             try:
                 response = await self._build_data_source().simulate_sign_and_broadcast(
-                    [swap.message for swap in swaps], memo=memo
+                    ([fill.message] if fill is not None else []) + [swap.message for swap in swaps], memo=memo
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 if isinstance(error, BeezeeTxRefusedError):
                     if error.is_denom_halted:
-                        for market in {swap.market.market_id: swap.market for swap in swaps}.values():
+                        markets = {swap.market.market_id: swap.market for swap in swaps}
+                        if fill is not None:
+                            markets[fill.market.market_id] = fill.market
+                        for market in markets.values():
                             await self._mark_market_halted_by_chain(market)
                     message = error.chain_message
                 else:
                     message = str(error)
+                for client_order_id in fill.client_order_ids if fill is not None else []:
+                    self._fail_tracked_order(client_order_id, f"Beezee fill failed: {message}", error, "BeezeeFillFailed")
                 for swap in swaps:
                     self._fail_swap(swap.pending.client_order_id, f"Beezee swap failed: {message}", error)
                 return
             tx_hash = response["tx_response"]["txhash"]
+            if fill is not None:
+                # The fill's entries are the tx's first OrderCreateMessageEvents: the swaps emit none.
+                self._register_fill_messages(fill.client_order_ids, tx_hash, first_index=0)
             self.logger().info(f"Beezee swap tx {tx_hash} submitted with {len(swaps)} swap(s).")
             for swap in swaps:
                 swap.pending.tx_hash = tx_hash
@@ -658,6 +697,9 @@ class BeezeeExchange(ExchangePyBase):
     def _fail_swap(self, client_order_id: str, message: str, error: Optional[Exception] = None):
         self._pending_swaps.pop(client_order_id, None)
         self.logger().warning(f"Beezee swap {client_order_id} failed: {message}")
+        self._fail_tracked_order(client_order_id, message, error, "BeezeeSwapFailed")
+
+    def _fail_tracked_order(self, client_order_id: str, message: str, error: Optional[Exception], error_type: str):
         order = self._order_tracker.fetch_tracked_order(client_order_id)
         if order is None:
             return
@@ -670,7 +712,7 @@ class BeezeeExchange(ExchangePyBase):
                 exchange_order_id=order.exchange_order_id,
                 misc_updates={
                     "error_message": message,
-                    "error_type": error.__class__.__name__ if error is not None else "BeezeeSwapFailed",
+                    "error_type": error.__class__.__name__ if error is not None else error_type,
                 },
             )
         )
@@ -714,6 +756,177 @@ class BeezeeExchange(ExchangePyBase):
             raise
         except Exception as error:
             self.logger().warning(f"Failed to refresh Beezee liquidity pools. Keeping the last known reserves. Error: {error}")
+
+    # === Taker fills ===
+    #
+    # A MsgFillOrders takes resting orders at exactly the given prices and never leaves an order resting. Each entry is
+    # tracked as an in-flight LIMIT order of its own (a taker, exchange id = its tx hash) and settled by its queue
+    # message id like a create (see "Order tracking from chain events"): its OrderExecutedEvents are its fills, and
+    # once its message is processed, the rest was refunded. It then ends FILLED, or CANCELED with the fills it got.
+    # The taker fee is paid once per message, so it is booked on the first fill of any of its entries.
+
+    def levels_to_take(
+        self, trading_pair: str, side: str, max_amount: Decimal, worst_price: Decimal
+    ) -> List[Tuple[Decimal, Decimal]]:
+        """(price, base amount) levels, display units and best first, to take from the last order book read for
+        `side` ("buy" takes asks, "sell" takes bids): at most `max_amount` base, no price worse than `worst_price`.
+        Ready to pass to `fill_orders`. Empty while no book was read yet."""
+        market = self._fill_market(trading_pair)
+        book = self._orderbook_ds.chain_levels(trading_pair) or {}
+        levels = book.get("asks" if side == CONSTANTS.SIDE_BUY else "bids") or []
+        try:
+            return book_levels_to_take(levels, market, side, Decimal(max_amount), Decimal(worst_price))
+        except ArithmeticError as error:
+            raise BeezeeFillError(f"invalid max_amount {max_amount} or worst_price {worst_price}: {error}")
+
+    def fill_orders(self, trading_pair: str, side: str, levels: Sequence[Tuple[Decimal, Decimal]]) -> List[str]:
+        """Takes resting orders at exactly each (price, base amount) level, in display units, in one MsgFillOrders.
+
+        `side` is ours: "buy" takes resting sells, "sell" takes resting buys. Levels below the chain minimum amount at
+        their price are dropped (logged). Returns one client order id per entry sent, in entry order. Each entry
+        settles as a taker order: an OrderFilled per match, then completed, or cancelled for the part the chain
+        refunded. Nothing ever rests. The message goes through the order batcher, so it may share a tx with creates
+        and cancels. Raises BeezeeFillError, sending nothing, when the fill is refused up front: no wallet, an unknown
+        pair, a halted market, an invalid level, more than 50 entries, or every level below the minimum.
+        """
+        fill = self._prepare_fill(trading_pair, side, levels)
+        key = fill.client_order_ids[0]
+        item = BatchedOrderMessage(
+            client_order_id=key,
+            is_cancel=False,
+            message=fill.message,
+            market=fill.market,
+            memo=f"{CONSTANTS.FILL_MEMO}:{key}",
+            fill_client_order_ids=fill.client_order_ids,
+        )
+        self._fill_tasks[key] = safe_ensure_future(self._submit_fill(item))
+        return fill.client_order_ids
+
+    def fill_orders_and_swap(
+        self,
+        trading_pair: str,
+        side: str,
+        levels: Sequence[Tuple[Decimal, Decimal]],
+        swaps: Sequence[BeezeeSwapRequest],
+    ) -> Tuple[List[str], List[str]]:
+        """`fill_orders` and `amm_swaps` in ONE tx: the MsgFillOrders first, then one MsgMultiSwap per swap.
+
+        The tx succeeds or fails as a whole. The swaps settle in the tx itself; the fill settles in its EndBlock and
+        may be refunded in part, which the swaps do not follow. Not batched with other messages. Returns (fill client
+        order ids, swap client order ids). Raises BeezeeFillError or BeezeeSwapError, sending nothing.
+        """
+        if not swaps:
+            raise BeezeeFillError("no swaps given: use fill_orders")
+        if self._signer is None:
+            raise BeezeeFillError("Beezee wallet mode is required for fills.")
+        # Both are checked before anything is tracked, so a refusal leaves no order behind.
+        market, entries, message = self._check_fill(trading_pair, side, levels)
+        prepared = self._prepare_swaps(list(swaps))
+        fill = PreparedFill(market=market, client_order_ids=self._track_fill(market, side, entries), message=message)
+        swap_ids = self._track_swaps(prepared)
+        key = fill.client_order_ids[0]
+        self._swap_tasks[key] = safe_ensure_future(self._send_swaps(key, prepared, fill=fill))
+        return fill.client_order_ids, swap_ids
+
+    def _fill_market(self, trading_pair: str) -> BeezeeMarket:
+        market = self._markets_by_trading_pair.get(trading_pair)
+        if market is None:
+            raise BeezeeFillError(f"unknown Beezee trading pair {trading_pair}")
+        return market
+
+    def _check_fill(
+        self, trading_pair: str, side: str, levels: Sequence[Tuple[Decimal, Decimal]]
+    ) -> Tuple[BeezeeMarket, List[BeezeeFillEntry], bytes]:
+        if self._signer is None:
+            raise BeezeeFillError("Beezee wallet mode is required for fills.")
+        market = self._fill_market(trading_pair)
+        halt_reason = self._halt_reason(market)
+        if halt_reason is not None:
+            raise BeezeeFillError(f"Beezee market {market.market_id} is halted ({halt_reason})")
+        entries, dropped = prepare_fill_entries(market, side, levels)
+        for price, amount in dropped:
+            self.logger().info(
+                f"Beezee fill on {trading_pair}: dropping the level {amount.normalize():f} at {price.normalize():f}, "
+                f"below the chain minimum amount."
+            )
+        message = self._build_data_source().fill_orders_message(
+            market, resting_side(side), [(entry.chain_price, entry.chain_amount) for entry in entries]
+        )
+        return market, entries, message
+
+    def _prepare_fill(self, trading_pair: str, side: str, levels: Sequence[Tuple[Decimal, Decimal]]) -> PreparedFill:
+        market, entries, message = self._check_fill(trading_pair, side, levels)
+        return PreparedFill(market=market, client_order_ids=self._track_fill(market, side, entries), message=message)
+
+    def _track_fill(self, market: BeezeeMarket, side: str, entries: List[BeezeeFillEntry]) -> List[str]:
+        # Groups whose entries have all settled are no longer needed for the fee or for cancels.
+        active_groups = {group for client_order_id, group in self._fill_groups.items() if client_order_id in self.in_flight_orders}
+        self._fill_groups = {key: group for key, group in self._fill_groups.items() if group in active_groups}
+        is_buy = side == CONSTANTS.SIDE_BUY
+        client_order_ids: List[str] = []
+        for entry in entries:
+            client_order_id = get_new_client_order_id(
+                is_buy=is_buy,
+                trading_pair=market.trading_pair,
+                hbot_order_id_prefix=self.client_order_id_prefix,
+                max_id_len=self.client_order_id_max_length,
+            )
+            self.start_tracking_order(
+                order_id=client_order_id,
+                exchange_order_id=None,
+                trading_pair=market.trading_pair,
+                trade_type=TradeType.BUY if is_buy else TradeType.SELL,
+                price=entry.price,
+                amount=entry.amount,
+                order_type=OrderType.LIMIT,
+            )
+            client_order_ids.append(client_order_id)
+        for client_order_id in client_order_ids:
+            self._fill_groups[client_order_id] = client_order_ids[0]
+        self.logger().info(
+            f"Beezee fill {client_order_ids[0]}: {side} on {market.trading_pair} taking "
+            + ", ".join(f"{entry.amount.normalize():f} at {entry.price.normalize():f}" for entry in entries)
+        )
+        return client_order_ids
+
+    async def _submit_fill(self, item: BatchedOrderMessage):
+        try:
+            await self._order_batcher.submit(item)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            for client_order_id in item.fill_client_order_ids:
+                self._fail_tracked_order(client_order_id, str(error), error, "BeezeeFillFailed")
+        finally:
+            if self._fill_tasks.get(item.client_order_id) is asyncio.current_task():
+                del self._fill_tasks[item.client_order_id]
+
+    def _register_fill_messages(self, client_order_ids: List[str], tx_hash: str, first_index: int):
+        """The fill's entries are in the tx: each is followed by its OrderCreateMessageEvent, the i-th entry being the
+        tx's (first_index + i)-th one of this account."""
+        for offset, client_order_id in enumerate(client_order_ids):
+            order = self._order_tracker.fetch_tracked_order(client_order_id)
+            if order is not None:
+                order.update_exchange_order_id(tx_hash)
+                self._update_order_state(order, OrderState.OPEN)
+            self._queue_message(
+                QueuedOrderMessage(
+                    client_order_id=client_order_id, tx_hash=tx_hash, msg_index=first_index + offset,
+                    fill_group=client_order_ids[0],
+                ),
+                is_cancel=False,
+            )
+        self.logger().info(
+            f"Beezee fill transaction submitted. client_order_ids={', '.join(client_order_ids)}, tx_hash={tx_hash}"
+        )
+
+    def _is_fill(self, client_order_id: str) -> bool:
+        return client_order_id in self._fill_groups
+
+    def _refresh_balances_soon(self):
+        """Re-reads the balances once: a settled fill got back the escrow it did not spend."""
+        if self._balance_refresh_task is None or self._balance_refresh_task.done():
+            self._balance_refresh_task = safe_ensure_future(self._update_balances())
 
     def _create_web_assistants_factory(self) -> WebAssistantsFactory:
         return web_utils.build_api_factory(throttler=self._throttler, auth=self._auth)
@@ -783,6 +996,9 @@ class BeezeeExchange(ExchangePyBase):
             raise ValueError("Beezee wallet mode is required for cancels.")
         if order_id in self._pending_swaps:
             self.logger().info(f"Beezee swap {order_id} settles in its own tx and cannot be cancelled.")
+            return False
+        if self._is_fill(order_id):
+            self.logger().info(f"Beezee fill {order_id} settles in EndBlock and cannot be cancelled.")
             return False
         # While a call waits for the order id or sends the cancel, the deferred-cancel retry leaves the order alone.
         self._cancels_in_progress[order_id] += 1
@@ -971,6 +1187,11 @@ class BeezeeExchange(ExchangePyBase):
         tx_hash = response["tx_response"]["txhash"]
         create_index = 0
         for item in items:
+            if item.fill_client_order_ids:
+                self._register_fill_messages(item.fill_client_order_ids, tx_hash, first_index=create_index)
+                create_index += len(item.fill_client_order_ids)
+                item.resolve(tx_hash)
+                continue
             if item.is_cancel:
                 order = self._order_tracker.fetch_tracked_order(item.client_order_id)
                 exchange_order_id = order.exchange_order_id if order is not None else None
@@ -1001,10 +1222,11 @@ class BeezeeExchange(ExchangePyBase):
             if message.tx_height is None and order is not None:
                 queued_ahead[order.trading_pair] = queued_ahead.get(order.trading_pair, 0) + 1
         data_source = self._build_data_source()
+        # A fill does not scan the queue (its extra gas grows with its own entries, which the simulation counts).
         return sum(
             queued_ahead[item.market.trading_pair] * data_source.queued_message_gas(item.market.market_id)
             for item in items
-            if not item.is_cancel and item.market.trading_pair in queued_ahead
+            if not item.is_cancel and not item.fill_client_order_ids and item.market.trading_pair in queued_ahead
         )
 
     async def _drop_halted_creates(
@@ -1031,7 +1253,7 @@ class BeezeeExchange(ExchangePyBase):
         else:
             message = str(error)
         for item in items:
-            kind = "cancel" if item.is_cancel else "order create"
+            kind = "cancel" if item.is_cancel else "fill" if item.fill_client_order_ids else "order create"
             rejection = IOError(f"Beezee {kind} failed: {message}")
             rejection.__cause__ = error
             item.reject(rejection)
@@ -1069,6 +1291,9 @@ class BeezeeExchange(ExchangePyBase):
             self._pool_refresh_task = None
         tasks = list(self._tx_lookup_tasks.values()) + list(self._halt_cancel_tasks.values())
         tasks += list(self._swap_tasks.values())
+        if self._balance_refresh_task is not None:
+            tasks.append(self._balance_refresh_task)
+            self._balance_refresh_task = None
         for task in tasks + list(self._tx_fetch_tasks.values()) + list(self._deferred_cancel_tasks.values()):
             task.cancel()
         self._swap_tasks.clear()
@@ -1164,6 +1389,7 @@ class BeezeeExchange(ExchangePyBase):
                 or order.is_done
                 or order.is_pending_cancel_confirmation
                 or order.client_order_id in self._pending_swaps
+                or self._is_fill(order.client_order_id)
             ):
                 continue
             running = self._halt_cancel_tasks.get(order.client_order_id)
@@ -1215,6 +1441,10 @@ class BeezeeExchange(ExchangePyBase):
             "cancels": {client_order_id: message.to_json() for client_order_id, message in self._queued_cancels.items()},
             "fills_counted_through": dict(self._fills_counted_through),
             "swaps": {client_order_id: swap.to_json() for client_order_id, swap in self._pending_swaps.items()},
+            "fills": {
+                client_order_id: group for client_order_id, group in self._fill_groups.items()
+                if client_order_id in self.in_flight_orders
+            },
         }
         return states
 
@@ -1227,6 +1457,10 @@ class BeezeeExchange(ExchangePyBase):
         saved_cancels = block_state.get("cancels") or {}
         self._fills_counted_through = dict(block_state.get("fills_counted_through") or {})
         saved_swaps = block_state.get("swaps") or {}
+        self._fill_groups = {
+            client_order_id: group for client_order_id, group in (block_state.get("fills") or {}).items()
+            if client_order_id in self.in_flight_orders
+        }
         for order in self.in_flight_orders.values():
             client_order_id = order.client_order_id
             exchange_order_id = order.exchange_order_id or ""
@@ -1240,7 +1474,8 @@ class BeezeeExchange(ExchangePyBase):
             elif len(exchange_order_id) == CONSTANTS.TX_HASH_LENGTH:
                 # A state saved without the tx details: the create message is matched by its values.
                 self._queued_creates[client_order_id] = QueuedOrderMessage(
-                    client_order_id=client_order_id, tx_hash=exchange_order_id
+                    client_order_id=client_order_id, tx_hash=exchange_order_id,
+                    fill_group=self._fill_groups.get(client_order_id),
                 )
             elif len(exchange_order_id) == CONSTANTS.ORDER_ID_LENGTH:
                 if client_order_id in saved_cancels:
@@ -1541,6 +1776,15 @@ class BeezeeExchange(ExchangePyBase):
                                 paid_taker_fee=paid_taker_fee,
                             )
                             outcomes.setdefault(message.client_order_id, None)
+                elif event.type == CONSTANTS.ORDER_MESSAGE_REFUNDED_EVENT and event.get("owner") == self._account_address:
+                    # Chain v8.3.0+: the message was processed and this part of it returned, so nothing (more) rests.
+                    message = self._match_create(creates, market_ids, event, event.get("order_type"))
+                    if message is not None:
+                        self.logger().info(
+                            f"Beezee order {message.client_order_id}: the chain refunded {event.get('amount')} base "
+                            f"units ({event.get('reason')}) at height {height}. message_id={message.message_id}"
+                        )
+                        outcomes.setdefault(message.client_order_id, None)
                 elif event.type == CONSTANTS.ORDER_SAVED_EVENT and event.get("owner") == self._account_address:
                     message = self._match_create(creates, market_ids, event, event.get("order_type"))
                     if message is not None:
@@ -1572,13 +1816,39 @@ class BeezeeExchange(ExchangePyBase):
             for message in superseded:
                 if message.client_order_id in outcomes or message.client_order_id in canceled:
                     continue
-                if self._queued_creates.get(message.client_order_id) is message:
+                if message.fill_group and self._queued_creates.get(message.client_order_id) is message:
+                    # A fill never rests: processed means settled, with the fills read so far.
+                    self._settle_order(message.client_order_id, height, {message.client_order_id: None}, set())
+                elif self._queued_creates.get(message.client_order_id) is message:
                     await self._finish_create_without_outcome(message, f"its message id was reused at height {height}")
                 elif self._queued_cancels.get(message.client_order_id) is message:
                     await self._finish_cancel_without_outcome(message, f"its message id was reused at height {height}")
+        await self._settle_processed_fills(height, creates)
         for message in creates + cancels:
             if message.next_height == height:
                 message.next_height = height + 1
+
+    async def _settle_processed_fills(self, height: int, creates: List[QueuedOrderMessage]):
+        """Settles the fills whose queue message is gone from the state committed at `height`: processed, with no
+        outcome event left to come. Chain v8.2.0 emits nothing for the refunded part of a fill, so a fill matching
+        nothing has no event at all; v8.3.0 emits OrderMessageRefundedEvent and settles before this is needed."""
+        data_source = self._build_data_source()
+        for message in creates:
+            if not message.fill_group or self._queued_creates.get(message.client_order_id) is not message:
+                continue
+            order = self._order_tracker.fetch_tracked_order(message.client_order_id)
+            if order is None:
+                continue
+            try:
+                market = await data_source.get_market_by_trading_pair(order.trading_pair)
+                pending = await data_source.is_queue_message_pending(market.market_id, message.message_id, height)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                self.logger().debug(f"Beezee queue read for fill {message.client_order_id} at {height} failed: {error}")
+                continue
+            if pending is False:
+                self._settle_order(message.client_order_id, height, {message.client_order_id: None}, set())
 
     def _match_create(
         self,
@@ -1611,6 +1881,8 @@ class BeezeeExchange(ExchangePyBase):
         create = self._queued_creates.pop(client_order_id, None) if client_order_id in outcomes else None
         if client_order_id in canceled:
             self._queued_cancels.pop(client_order_id, None)
+        if create is not None and create.fill_group:
+            self._refresh_balances_soon()
         if order is None:
             return
         if order.executed_amount_base >= order.amount:
@@ -1681,7 +1953,14 @@ class BeezeeExchange(ExchangePyBase):
         first fill only. The chain charges the taker fee when an opposite order rests at that exact price, else the
         maker fee; a first fill crossing an order that rested before the create tx counts as taker, any other as
         maker."""
-        if order.order_fills:
+        group = self._fill_groups.get(order.client_order_id)
+        if group is not None:
+            # A MsgFillOrders pays the taker fee once, for all of its entries.
+            entries = [self._order_tracker.fetch_order(key) for key, other in self._fill_groups.items() if other == group]
+            if any(entry is not None and entry.order_fills for entry in entries):
+                return AddedToCostTradeFee(flat_fees=[])
+            is_taker = True
+        elif order.order_fills:
             return AddedToCostTradeFee(flat_fees=[])
         return self.get_fee(
             market.base.symbol, market.quote.symbol, order.order_type, order.trade_type, amount, price,
@@ -1699,6 +1978,9 @@ class BeezeeExchange(ExchangePyBase):
 
     async def _finish_create_without_outcome(self, message: QueuedOrderMessage, reason: str):
         self._queued_creates.pop(message.client_order_id, None)
+        if message.fill_group:
+            # Its escrow may have come back meanwhile; the fills read so far stay booked.
+            self._refresh_balances_soon()
         self.logger().warning(
             f"Beezee order {message.client_order_id} failed: {reason}. tx_hash={message.tx_hash}, "
             f"message_id={message.message_id}, tx_height={message.tx_height}"
@@ -1711,6 +1993,10 @@ class BeezeeExchange(ExchangePyBase):
         """Settles a create whose outcome cannot be read from blocks: it rests if the book holds an order of ours with
         its market, side and price and its amount or less that no tracked order claims (the difference is booked as
         one fill), else it fails."""
+        if message.fill_group:
+            # A fill never rests, so the book cannot tell its outcome.
+            await self._finish_create_without_outcome(message, reason)
+            return
         self._queued_creates.pop(message.client_order_id, None)
         order = self._order_tracker.fetch_tracked_order(message.client_order_id)
         if order is None:
@@ -1758,6 +2044,15 @@ class BeezeeExchange(ExchangePyBase):
             order = self._order_tracker.fetch_tracked_order(client_order_id)
             if order is None or order.exchange_order_id:
                 self._restored_without_tx.discard(client_order_id)
+                continue
+            if self._is_fill(client_order_id):
+                self._restored_without_tx.discard(client_order_id)
+                self.logger().warning(
+                    f"Beezee fill {client_order_id} was saved before its tx was known, so whether it was sent is "
+                    f"unknown. Marking it failed; the balances are read again from the chain."
+                )
+                self._update_order_state(order, OrderState.FAILED)
+                self._refresh_balances_soon()
                 continue
             if any(self._is_same_order(order, message) for message in self._queued_creates.values()):
                 continue

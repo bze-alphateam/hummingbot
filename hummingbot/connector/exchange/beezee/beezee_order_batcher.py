@@ -7,7 +7,11 @@ from hummingbot.connector.exchange.beezee.beezee_utils import BeezeeMarket
 
 @dataclass
 class BatchedOrderMessage:
-    """One create or cancel message waiting for its batch tx. `result` resolves to the tx hash, or to the error."""
+    """One create or cancel message waiting for its batch tx. `result` resolves to the tx hash, or to the error.
+
+    A fill (MsgFillOrders) is queued as a create: `fill_client_order_ids` are its entries' orders, in entry order,
+    and `client_order_id` is the first of them.
+    """
 
     client_order_id: str
     is_cancel: bool
@@ -15,6 +19,7 @@ class BatchedOrderMessage:
     market: BeezeeMarket
     memo: str
     result: asyncio.Future = field(default_factory=lambda: asyncio.get_event_loop().create_future())
+    fill_client_order_ids: List[str] = field(default_factory=list)
 
     def resolve(self, tx_hash: str):
         if not self.result.done():

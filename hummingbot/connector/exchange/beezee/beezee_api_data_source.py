@@ -20,6 +20,7 @@ from hummingbot.connector.exchange.beezee.beezee_tx import (
     gas_limit_from_simulation,
     msg_cancel_order,
     msg_create_order,
+    msg_fill_orders,
     msg_multi_swap,
 )
 from hummingbot.connector.exchange.beezee.beezee_utils import (
@@ -169,6 +170,21 @@ class BeezeeAPIDataSource:
 
     async def get_block_results(self, height: int) -> Dict[str, Any]:
         return await self._rpc_request(CONSTANTS.BLOCK_RESULTS_PATH_URL, params={"height": height})
+
+    async def is_queue_message_pending(self, market_id: str, message_id: str, height: int) -> Optional[bool]:
+        """Whether the tradebin queue still held the message in the state committed at `height` (raw store read).
+
+        A queued message is deleted in the EndBlock that processes it, so False at the height of its tx block, or of
+        any block after it, means it was processed by then. None when the node cannot answer for that height.
+        """
+        key = f"{CONSTANTS.QUEUE_MESSAGE_KEY_PREFIX}{market_id}/{message_id}/".encode()
+        result = await self._rpc_request(CONSTANTS.ABCI_QUERY_PATH_URL, params={
+            "path": f'"{CONSTANTS.TRADEBIN_STORE_QUERY_PATH}"', "data": f"0x{key.hex()}", "height": height,
+        })
+        response = result.get("response") or {}
+        if int(response.get("code") or 0) != 0:
+            return None
+        return bool(response.get("value"))
 
     async def _paged_request(self, path_url: str, item_key: str, params: Optional[Dict[str, Any]] = None, page_limit: int = CONSTANTS.DEFAULT_MARKET_PAGE_SIZE, headers: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
@@ -501,6 +517,14 @@ class BeezeeAPIDataSource:
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required for swaps.")
         return msg_multi_swap(self._signer.address, [pool_id], input_denom, str(input_amount), output_denom, str(min_output_amount))
+
+    def fill_orders_message(self, market: BeezeeMarket, order_type: str, orders: List[Tuple[str, int]]) -> bytes:
+        """A MsgFillOrders taking resting `order_type` orders at exactly each (chain price, base amount) entry."""
+        if self._signer is None:
+            raise ValueError("Beezee wallet mode is required for fills.")
+        return msg_fill_orders(
+            self._signer.address, market.market_id, order_type, [(price, str(amount)) for price, amount in orders]
+        )
 
     async def broadcast_create_order(self, market: BeezeeMarket, order_type: str, amount: Decimal, price: Decimal, memo: str = "") -> Dict[str, Any]:
         message = self.create_order_message(market, order_type, amount, price)
