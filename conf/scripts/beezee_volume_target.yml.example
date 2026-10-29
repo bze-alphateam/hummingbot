@@ -2,7 +2,7 @@
 ###  Volume target on BeeZee mainnet: BZE/USDC.inj    ###
 #########################################################
 # Copy to conf/scripts/beezee_volume_target.yml, set the volume and the fee cap, then
-#   start --script beezee_volume_target.py --conf beezee_volume_target.yml
+#   start --v2 beezee_volume_target.yml
 # Every cycle_seconds the script sells and buys the same amount at the same price, strictly inside the current
 # spread, in one tx: the two orders fill each other, so it never trades with anyone else. Fees and gas are the cost.
 # How it works and what it costs: README_BZE.md, section "Volume target".
@@ -33,9 +33,10 @@ min_order_amount: 1
 max_order_amount: 5000
 
 # Tradebin fees + gas per UTC day, in BZE. Reaching it stops the script until UTC midnight.
-# One cycle pays the maker fee (0.001 BZE) on the leg that rests, the taker fee (0.1 BZE) on the leg that fills it
-# and the gas of one tx (a few thousandths of a BZE): about 0.105 BZE, so about 30 BZE a day at 300 s.
-max_daily_fee_spend: 35
+# Both legs of a cycle land in one tx, so neither rests on the book when the other is signed and both pay the maker
+# fee (2 x 0.001 BZE; the 0.1 BZE taker fee is only for crossing an order resting from an earlier block). Plus the gas
+# of one tx (about 0.003 BZE): about 0.005 BZE a cycle, so about 1.5 BZE a day at 300 s.
+max_daily_fee_spend: 2
 
 # Price anchor: the volume-weighted price of BZE on CoinGecko's external venues, divided by USDC's price.
 # CoinGecko's own BZE price includes BeeZee DEX, which this script would come to dominate, so those tickers are

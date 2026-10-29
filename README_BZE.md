@@ -188,7 +188,9 @@ Same steps as the testnet run, with:
   `1.3`. To change the gas price or adjustment, edit `network.gas_price` / `network.gas_adjustment` in
   `conf/connectors/beezee.yml` while the client is stopped.
 - A dedicated wallet holding only the BZE and USDC.inj the bot may trade, plus BZE for gas: every tx pays gas, and every
-  order pays the tradebin fee when it is created (mainnet: 0.1 BZE taker, 0.001 BZE maker).
+  order pays the tradebin fee when it is created (mainnet: 0.1 BZE taker, 0.001 BZE maker). The taker fee applies only
+  when the order crosses an order that already rested on the book from an earlier block; crossing an order placed in
+  the same block or tx costs the maker fee.
 - `cp conf/strategies/beezee_pmm_bze_usdc.yml.example hb/conf/strategies/beezee_pmm_bze_usdc.yml`, set `order_amount`,
   then `import beezee_pmm_bze_usdc.yml` and `start`.
 - The book must have a bid and an ask (see "Seeding the book"). Cancel-all check after `stop` in dex.getbze.com.
@@ -230,15 +232,17 @@ for BZE/USDC.inj, whose quote the bot counts in base units. It refreshes every `
 - When the book mid is more than `max_anchor_deviation_pct` away from the anchor, the cycle pauses: volume there would
   print an off-market price, and fixing the book is arbitrage's job. Not checked on the `book_mid` fallback.
 
-**Cost.** Tradebin charges each order its fee at creation: the leg that rests pays the maker fee, the one that fills it
-the taker fee (mainnet: 0.001 + 0.1 BZE). The tx pays gas once for both legs. On mainnet a cycle costs about 0.105 BZE,
-so about 30 BZE a day at `cycle_seconds: 300`, whatever the volume. The wallet needs the BZE for that, the base for the
+**Cost.** Tradebin charges each order its fee when the tx runs: the taker fee only when an opposite order already
+rests at that price from an earlier block, else the maker fee. Both legs of a cycle land in the same tx, so neither is
+on the book when the other is signed, and both pay the maker fee (mainnet: 2 x 0.001 BZE). The tx pays gas once for both
+legs, about 0.003 BZE. A cycle costs about 0.005 BZE, so about 1.5 BZE a day at `cycle_seconds: 300` (288 cycles),
+whatever the volume. The wallet needs the BZE for that, the base for the
 sell leg and the quote for the buy leg; a cycle without both balances is skipped. The counters live in memory: a
 restart starts the day's volume and spend from zero.
 
 **Run.** `cp conf/scripts/beezee_volume_target.yml.example hb/conf/scripts/beezee_volume_target.yml` (mount
 `hb/conf` as in "Running the image"), set `daily_volume_quote` and `max_daily_fee_spend`, then in the client:
-`start --script beezee_volume_target.py --conf beezee_volume_target.yml`. The example is for BZE/USDC.inj on mainnet
+`start --v2 beezee_volume_target.yml`. The example is for BZE/USDC.inj on mainnet
 and documents every key; a test loads it.
 
 **Testnet.** Testnet has no CoinGecko price, so leave `coingecko_id_base` empty with `anchor_fallback: book_mid`, set
@@ -251,7 +255,7 @@ several ticks apart (see "Seeding the book"). Checks:
       moment; the side that goes first alternates.
 - [ ] No other address's order was filled by the bot: every trade of the bot's address has the bot on both sides.
 - [ ] Base and quote balances are unchanged apart from fees + gas.
-- [ ] With `max_daily_fee_spend` set low (e.g. 0.5), it stops after a few cycles with "daily fee cap reached".
+- [ ] With `max_daily_fee_spend` set low (e.g. 0.02), it stops after about 4 cycles with "daily fee cap reached".
 - [ ] A spread of one tick (or an empty side) skips the cycle with that reason in `status`.
 - [ ] Take one leg from a second wallet before it fills: the next cycle cancels the other leg, and only the filled
       amount counts.
@@ -319,5 +323,7 @@ several ticks apart (see "Seeding the book"). Checks:
   nothing). If its create tx is already on its way, the cancel is sent as soon as the chain gives the order its id,
   and a refused batch's single-send fallback skips that create.
 - **Fee bookkeeping.** The chain charges the tradebin fee once per order when the create runs, so the connector books
-  it on the order's first fill only. An order that rests and never fills still paid the maker fee, which Hummingbot
+  it on the order's first fill only. It is the taker fee only when the fill crossed an order that rested before the
+  create's tx block; crossing an order saved in that block or later (both legs of a same-tx self-fill) books the maker
+  fee, as the chain charged. An order that rests and never fills still paid the maker fee, which Hummingbot
   cannot record without a fill.

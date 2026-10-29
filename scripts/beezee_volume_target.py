@@ -131,11 +131,12 @@ class BeezeeVolumeTarget(StrategyV2Base):
         self._tradebin_fees_today = Decimal("0")
         self._gas_baseline = Decimal("0")
         self._counted_trades: Set[str] = set()
-        # Orders this script placed, and of those the ones whose create tx went out (tradebin charges its fee then)
-        # and the ones with at least one fill.
+        # Orders this script placed, and of those the ones whose create tx went out (tradebin charges its fee then),
+        # the ones with at least one fill and the ones whose tradebin fee is already in the spend.
         self._own_orders: Set[str] = set()
         self._created_orders: Set[str] = set()
         self._filled_orders: Set[str] = set()
+        self._fee_counted_orders: Set[str] = set()
         self._anchor: Optional[Decimal] = None
         self._anchor_timestamp: Optional[float] = None
         self._next_anchor_refresh = 0.0
@@ -403,8 +404,11 @@ class BeezeeVolumeTarget(StrategyV2Base):
             return
         self._roll_day()
         self._filled_orders.add(event.order_id)
-        # The connector puts each order's tradebin fee on its first fill.
-        self._tradebin_fees_today += sum((fee.amount for fee in event.trade_fee.flat_fees), Decimal("0"))
+        # The connector puts each order's tradebin fee on its first fill: the maker fee for both legs of a self-fill,
+        # since the chain charges the taker fee only for crossing an order that rested before the tx.
+        fee = sum((fee.amount for fee in event.trade_fee.flat_fees), Decimal("0"))
+        if fee > 0:
+            self._add_order_fee(event.order_id, fee)
         key = trade_key(event)
         if key not in self._counted_trades:
             self._counted_trades.add(key)
@@ -416,7 +420,13 @@ class BeezeeVolumeTarget(StrategyV2Base):
         self._roll_day()
         if event.order_id in self._created_orders and event.order_id not in self._filled_orders:
             # Tradebin charged the maker fee when the order was created, and no fill reported it.
-            self._tradebin_fees_today += self._maker_fee()
+            self._add_order_fee(event.order_id, self._maker_fee())
+
+    def _add_order_fee(self, order_id: str, fee: Decimal):
+        """Tradebin charges one fee per order, so an order's fee enters the spend once."""
+        if order_id not in self._fee_counted_orders:
+            self._fee_counted_orders.add(order_id)
+            self._tradebin_fees_today += fee
 
     def _maker_fee(self) -> Decimal:
         base, quote = self.config.trading_pair.split("-", 1)
