@@ -125,6 +125,8 @@ class BeezeeChainTestCase(unittest.IsolatedAsyncioTestCase):
     level = 0
     # Connector settings beyond the network and the wallet.
     config_overrides: Dict[str, Any] = {}
+    # The pairs the connector is started with, i.e. the pairs the strategy trades.
+    trading_pairs: List[str] = ["BZE-USDC", "TKN-BZE"]
 
     def handle(self, record):
         self.log_records.append(record)
@@ -143,7 +145,7 @@ class BeezeeChainTestCase(unittest.IsolatedAsyncioTestCase):
             account_type=BeezeeMnemonicWalletAccountMode(mnemonic=TEST_MNEMONIC),
             **self.config_overrides,
         )
-        self.exchange = BeezeeExchange(connector_configuration=config, trading_pairs=["BZE-USDC", "TKN-BZE"])
+        self.exchange = BeezeeExchange(connector_configuration=config, trading_pairs=self.trading_pairs)
         self.assertEqual(ADDRESS, self.exchange._account_address)
         self.exchange._set_current_timestamp(1640780000)
 

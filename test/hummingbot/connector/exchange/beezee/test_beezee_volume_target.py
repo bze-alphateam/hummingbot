@@ -557,6 +557,35 @@ class BeezeeVolumeTargetTests(unittest.IsolatedAsyncioTestCase):
         await self._run_until(NOON + 600)
         self.assertEqual(2, len(self.connector.batches))
 
+    async def test_restored_leftover_leg_is_adopted_and_cancelled_before_trading(self):
+        # A crash left one leg of a cycle resting: the restart restored it into the connector before the clock started.
+        leftover = FakeOrder("buy-old", PAIR, True, Decimal("334"), Decimal("5"))
+        other_pair = FakeOrder("sell-other", "TKN-BZE", False, Decimal("2"), Decimal("1"))
+        done = FakeOrder("sell-old", PAIR, False, Decimal("334"), Decimal("5"), is_done=True)
+        for order in (leftover, other_pair, done):
+            self.connector.orders[order.client_order_id] = order
+        strategy = self._strategy()
+        await self._run_until(NOON)
+
+        self.assertEqual(["buy-old"], self.connector.cancels)
+        self.assertEqual([], self.connector.batches)
+        self.assertIn("leftover", strategy._last_skip_reason)
+
+        leftover.is_done = True
+        await self._run_until(NOON + 300)
+        self.assertEqual(1, len(self.connector.batches))
+        self.assertEqual(["buy-old"], self.connector.cancels)
+
+    async def test_fill_of_an_adopted_order_counts_toward_the_volume(self):
+        leftover = FakeOrder("sell-old", PAIR, False, Decimal("335"), Decimal("4"))
+        self.connector.orders[leftover.client_order_id] = leftover
+        strategy = self._strategy()
+        await self._run_until(NOON)
+
+        self._fill(leftover, Decimal("4"), "20-1-maker", MAKER_FEE)
+
+        self.assertEqual(Decimal("1440000") - Decimal("4") * Decimal("335"), strategy.remaining_quote)
+
     async def test_only_filled_volume_counts_and_a_self_fill_counts_once(self):
         strategy = self._strategy()
         await self._run_until(NOON)
