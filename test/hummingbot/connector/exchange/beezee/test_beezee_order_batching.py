@@ -65,12 +65,17 @@ def _first(fields: List[Tuple[int, Any]], number: int, default: Any = None) -> A
 
 @dataclass
 class SentMessage:
-    kind: str  # "create" or "cancel"
-    market_id: str
+    kind: str  # "create", "cancel" or "swap"
+    market_id: str  # the pool id for a swap
     order_type: str
     amount: Optional[str] = None
     price: Optional[str] = None
     order_id: Optional[str] = None
+    # Swaps: the routes, the input denom (`amount` is the input amount) and the minimum output.
+    routes: Optional[List[str]] = None
+    input_denom: Optional[str] = None
+    min_output_denom: Optional[str] = None
+    min_output: Optional[str] = None
 
 
 @dataclass
@@ -94,6 +99,16 @@ def decode_tx(request_kwargs: Dict[str, Any]) -> SentTx:
             continue
         any_fields = _fields(any_bytes)
         type_url, payload = _first(any_fields, 1).decode(), _fields(_first(any_fields, 2))
+        if type_url == "/bze.tradebin.MsgMultiSwap":
+            assert _first(payload, 1).decode() == ADDRESS
+            routes = [value.decode() for number, value in payload if number == 2]
+            coin_in = {number: value.decode() for number, value in _fields(_first(payload, 3))}
+            min_out = {number: value.decode() for number, value in _fields(_first(payload, 4))}
+            messages.append(SentMessage(
+                "swap", routes[0], "", amount=coin_in[2], routes=routes, input_denom=coin_in[1],
+                min_output_denom=min_out[1], min_output=min_out[2],
+            ))
+            continue
         text = {number: value.decode() for number, value in payload}
         if type_url == "/bze.tradebin.MsgCreateOrder":
             assert text[1] == ADDRESS
@@ -111,7 +126,8 @@ class FakeNode:
     """A BZE node for the connector's tx path: simulation, CheckTx and the tradebin queue.
 
     Each broadcast tx lands in its own block. Its create messages queue with message ids 0.. in message order and rest
-    in that block with ids from 6820000 on; its cancels cancel their orders in that block.
+    in that block with ids from 6820000 on; its cancels cancel their orders in that block; its swaps pay exactly their
+    minimum output in the tx.
     """
 
     sequence: int = 3
@@ -178,7 +194,13 @@ class FakeNode:
         tx_events, block_events = [], []
         for msg_index, message in enumerate(sent.messages):
             message_id = f"{msg_index:024d}"
-            if message.kind == "create":
+            if message.kind == "swap":
+                tx_events.append(tx_event("SwapEvent", msg_index, **{
+                    "creator": ADDRESS, "pool_id": message.market_id,
+                    "in": {"denom": message.input_denom, "amount": message.amount},
+                    "out": {"denom": message.min_output_denom, "amount": message.min_output},
+                }))
+            elif message.kind == "create":
                 tx_events.append(tx_event(
                     "OrderCreateMessageEvent", msg_index, creator=ADDRESS, market_id=message.market_id,
                     order_type=message.order_type, amount=message.amount, price=message.price, message_id=message_id,

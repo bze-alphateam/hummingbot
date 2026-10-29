@@ -56,6 +56,8 @@ ORDER_CANCEL_MESSAGE_EVENT = "bze.tradebin.OrderCancelMessageEvent"
 ORDER_EXECUTED_EVENT = "bze.tradebin.OrderExecutedEvent"
 ORDER_SAVED_EVENT = "bze.tradebin.OrderSavedEvent"
 ORDER_CANCELED_EVENT = "bze.tradebin.OrderCanceledEvent"
+# Emitted by MsgMultiSwap for each pool it swaps on, in the tx itself (swaps do not go through the order queue).
+SWAP_EVENT = "bze.tradebin.SwapEvent"
 # A queued message's outcome is looked for in its tx block and the 19 blocks after it.
 ORDER_OUTCOME_BLOCK_WINDOW = 20
 # A cancel of an order whose create tx is on its way waits this long (s) for the order's chain id before it is
@@ -93,6 +95,9 @@ QUEUE_MESSAGE_FIXED_BYTES = 200
 DEFAULT_BATCH_WINDOW_MS = 300
 DEFAULT_MAX_MESSAGES_PER_TX = 25
 BATCH_MEMO = "hbot-batch"
+SWAP_BATCH_MEMO = "hbot-swaps"
+# Settled swaps kept for `get_swap_result`, newest last.
+SWAP_RESULTS_KEPT = 1000
 # Legacy fixed gas limits, replaced by tx simulation. Still accepted (and ignored) in saved configs.
 LEGACY_GAS_LIMIT_CONFIG_KEYS = ("create_order_gas_limit", "cancel_order_gas_limit")
 
