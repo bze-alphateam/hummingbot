@@ -159,7 +159,19 @@ class BeezeeVolumeTarget(StrategyV2Base):
 
     def start(self, clock: Clock, timestamp: float) -> None:
         super().start(clock, timestamp)
+        self._adopt_restored_orders()
         self._refresh_anchor_if_due()
+
+    def _adopt_restored_orders(self):
+        """After a crash or restart the connector holds the previous run's open orders on the pair (restored before
+        the clock starts). They count as this script's own, so the first cycle cancels a leg left half-done."""
+        restored = [
+            order.client_order_id for order in self.connector.in_flight_orders.values()
+            if order.trading_pair == self.config.trading_pair and not order.is_done
+        ]
+        if restored:
+            self._own_orders.update(restored)
+            self.log_with_clock(logging.INFO, f"Adopted {len(restored)} restored order(s): {', '.join(restored)}.")
 
     def on_tick(self):
         self._roll_day()
