@@ -1071,7 +1071,11 @@ class BeezeeExchange(ExchangePyBase):
                         message = self._match_create(creates, market_ids, event, self._opposite_side(event.get("order_type")))
                         if message is not None:
                             order = self._order_tracker.fetch_order(message.client_order_id)
-                            self._process_fill(order, market, event, height, f"{height}-{index}-taker", is_taker=True)
+                            paid_taker_fee = self._rested_before_tx(event.get("id"), message.tx_height, height, events[:index])
+                            self._process_fill(
+                                order, market, event, height, f"{height}-{index}-taker", is_taker=True,
+                                paid_taker_fee=paid_taker_fee,
+                            )
                             outcomes.setdefault(message.client_order_id, None)
                 elif event.type == CONSTANTS.ORDER_SAVED_EVENT and event.get("owner") == self._account_address:
                     message = self._match_create(creates, market_ids, event, event.get("order_type"))
@@ -1167,8 +1171,27 @@ class BeezeeExchange(ExchangePyBase):
             )
         self._update_order_state(order, state)
 
+    def _rested_before_tx(self, order_id: str, tx_height: int, height: int, events_before: List[TradebinEvent]) -> bool:
+        """Whether the crossed order already rested on the book when our create tx ran. Tradebin picks the fee at tx
+        time: taker only when an opposite order rests at that price, so crossing an order saved in the tx block or
+        later (both legs of a same-block self-fill) costs the maker fee. A block missing from the cache counts as
+        rested, so the fee is never under-reported."""
+        def saved(events: List[TradebinEvent]) -> bool:
+            return any(event.type == CONSTANTS.ORDER_SAVED_EVENT and event.get("id") == order_id for event in events)
+
+        if saved(events_before):
+            return False
+        for earlier_height in range(tx_height, height):
+            events = self._block_events_cache.get(earlier_height)
+            if events is None:
+                return True
+            if saved(events):
+                return False
+        return True
+
     def _process_fill(
-        self, order: InFlightOrder, market: BeezeeMarket, event: TradebinEvent, height: int, trade_id: str, is_taker: bool
+        self, order: InFlightOrder, market: BeezeeMarket, event: TradebinEvent, height: int, trade_id: str, is_taker: bool,
+        paid_taker_fee: Optional[bool] = None,
     ):
         if height <= self._fills_counted_through.get(order.client_order_id, -1):
             return
@@ -1184,7 +1207,7 @@ class BeezeeExchange(ExchangePyBase):
                 fill_price=price,
                 fill_base_amount=amount,
                 fill_quote_amount=amount * price,
-                fee=self._fill_fee(order, market, amount, price, is_taker),
+                fee=self._fill_fee(order, market, amount, price, is_taker if paid_taker_fee is None else paid_taker_fee),
                 is_taker=is_taker,
             )
         )
@@ -1192,7 +1215,8 @@ class BeezeeExchange(ExchangePyBase):
     def _fill_fee(self, order: InFlightOrder, market: BeezeeMarket, amount: Decimal, price: Decimal, is_taker: bool):
         """The tradebin fee is a flat amount charged once per create message, at tx time, so it goes on the order's
         first fill only. The chain charges the taker fee when an opposite order rests at that exact price, else the
-        maker fee; a first fill taken while the create is processed counts as taker, any other as maker."""
+        maker fee; a first fill crossing an order that rested before the create tx counts as taker, any other as
+        maker."""
         if order.order_fills:
             return AddedToCostTradeFee(flat_fees=[])
         return self.get_fee(

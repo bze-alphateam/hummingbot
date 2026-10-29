@@ -743,6 +743,115 @@ class BeezeeOrderTrackingTests(BeezeeChainTestCase):
         fees = [fill.trade_fee.flat_fees for fill in self.events[MarketEvent.OrderFilled].event_log]
         self.assertEqual([[TokenAmount("BZE", Decimal("0.1"))], []], fees)
 
+    # --- fees: tradebin charges the taker fee only for crossing an order that rested before the create tx ---
+
+    async def test_crossing_an_order_resting_before_the_tx_pays_the_taker_fee(self):
+        tx_hash = "45" * 32
+        message_id = "000000000000000000000004"
+        self._mock_broadcast(tx_hash)
+        self._mock_tx(tx_hash, tx(tx_hash, H, [create_message("buy", "20000000", "0.0003", message_id)]))
+        self._mock_latest_height(H)
+        self._mock_blocks({H: block_results(H, [
+            block_event("OrderExecutedEvent", id="000000000000000006810001", market_id=BZE_USDC, order_type="sell",
+                        amount="20000000", price="0.0003", maker=OTHER_ADDRESS, taker=ADDRESS, message_id=message_id),
+        ])})
+
+        order_id = self.exchange.buy("BZE-USDC", Decimal("20"), OrderType.LIMIT, Decimal("0.0003"))
+        await self._run_until(lambda: order_id in self._event_ids(MarketEvent.BuyOrderCompleted), "the order did not fill")
+
+        self._assert_fills([(Decimal("20"), Decimal("0.0003"), [TokenAmount("BZE", Decimal("0.1"))])])
+
+    async def test_crossing_an_order_saved_in_the_same_block_pays_the_maker_fee(self):
+        tx_hash = "46" * 32
+        message_id = "000000000000000000000005"
+        self._mock_broadcast(tx_hash)
+        self._mock_tx(tx_hash, tx(tx_hash, H, [create_message("buy", "20000000", "0.0003", message_id)]))
+        self._mock_latest_height(H)
+        self._mock_blocks({H: block_results(H, [
+            block_event("OrderSavedEvent", id="000000000000000006810001", market_id=BZE_USDC, order_type="sell",
+                        amount="20000000", price="0.0003", owner=OTHER_ADDRESS, message_id="000000000000000000000004"),
+            block_event("OrderExecutedEvent", id="000000000000000006810001", market_id=BZE_USDC, order_type="sell",
+                        amount="20000000", price="0.0003", maker=OTHER_ADDRESS, taker=ADDRESS, message_id=message_id),
+        ])})
+
+        order_id = self.exchange.buy("BZE-USDC", Decimal("20"), OrderType.LIMIT, Decimal("0.0003"))
+        await self._run_until(lambda: order_id in self._event_ids(MarketEvent.BuyOrderCompleted), "the order did not fill")
+
+        fill = self.events[MarketEvent.OrderFilled].event_log[0]
+        self.assertEqual([TokenAmount("BZE", Decimal("0.001"))], fill.trade_fee.flat_fees)
+        self.assertEqual(f"{H}-1-taker", fill.exchange_trade_id)
+
+    async def test_crossing_an_order_saved_after_the_tx_block_pays_the_maker_fee(self):
+        tx_hash = "47" * 32
+        message_id = "000000000000000000000005"
+        self._mock_broadcast(tx_hash)
+        self._mock_tx(tx_hash, tx(tx_hash, H, [create_message("buy", "20000000", "0.0003", message_id)]))
+        self._mock_latest_height(H + 2)
+        self._mock_blocks({
+            H + 1: block_results(H + 1, [
+                block_event("OrderSavedEvent", id="000000000000000006810001", market_id=BZE_USDC, order_type="sell",
+                            amount="20000000", price="0.0003", owner=OTHER_ADDRESS, message_id="000000000000000000000004"),
+            ]),
+            H + 2: block_results(H + 2, [
+                block_event("OrderExecutedEvent", id="000000000000000006810001", market_id=BZE_USDC, order_type="sell",
+                            amount="20000000", price="0.0003", maker=OTHER_ADDRESS, taker=ADDRESS, message_id=message_id),
+            ]),
+        }, empty_up_to=H + 2)
+        self._mock_blocks({H: block_results(H)})
+
+        order_id = self.exchange.buy("BZE-USDC", Decimal("20"), OrderType.LIMIT, Decimal("0.0003"))
+        await self._run_until(lambda: order_id in self._event_ids(MarketEvent.BuyOrderCompleted), "the order did not fill")
+
+        self.assertEqual([H, H + 1, H + 2], self._requested_heights())
+        self._assert_fills([(Decimal("20"), Decimal("0.0003"), [TokenAmount("BZE", Decimal("0.001"))])])
+
+    async def test_self_fill_in_one_tx_charges_both_legs_the_maker_fee(self):
+        sell = InFlightOrder(
+            client_order_id="OID-SELL", trading_pair="BZE-USDC", order_type=OrderType.LIMIT, trade_type=TradeType.SELL,
+            amount=Decimal("20"), price=Decimal("0.0003"), creation_timestamp=1.0, exchange_order_id=CREATE_BATCH_TX,
+            initial_state=OrderState.OPEN,
+        )
+        buy = InFlightOrder(
+            client_order_id="OID-BUY", trading_pair="BZE-USDC", order_type=OrderType.LIMIT, trade_type=TradeType.BUY,
+            amount=Decimal("20"), price=Decimal("0.0003"), creation_timestamp=1.0, exchange_order_id=CREATE_BATCH_TX,
+            initial_state=OrderState.OPEN,
+        )
+        self._restore([sell, buy], {"last_processed_height": H - 1, "creates": {
+            "OID-SELL": {"client_order_id": "OID-SELL", "tx_hash": CREATE_BATCH_TX, "msg_index": 0},
+            "OID-BUY": {"client_order_id": "OID-BUY", "tx_hash": CREATE_BATCH_TX, "msg_index": 1},
+        }, "cancels": {}})
+        sell_id, buy_id = "000000000000000000000001", "000000000000000000000002"
+        tx_events = [
+            tx_event("OrderCreateMessageEvent", 0, creator=ADDRESS, market_id=BZE_USDC, order_type="sell",
+                     amount="20000000", price="0.0003", message_id=sell_id),
+            tx_event("OrderCreateMessageEvent", 1, creator=ADDRESS, market_id=BZE_USDC, order_type="buy",
+                     amount="20000000", price="0.0003", message_id=buy_id),
+        ]
+        self._mock_tx(CREATE_BATCH_TX, tx(CREATE_BATCH_TX, H, tx_events))
+        self._mock_tx(CREATE_BATCH_TX, tx(CREATE_BATCH_TX, H, tx_events))
+        self._mock_latest_height(H - 1)
+        self._mock_latest_height(H)
+        self._mock_latest_height(H)
+        self._mock_blocks({H: block_results(H, [
+            block_event("OrderSavedEvent", id="000000000000000006810001", market_id=BZE_USDC, order_type="sell",
+                        amount="20000000", price="0.0003", owner=ADDRESS, message_id=sell_id),
+            block_event("OrderExecutedEvent", id="000000000000000006810001", market_id=BZE_USDC, order_type="sell",
+                        amount="20000000", price="0.0003", maker=ADDRESS, taker=ADDRESS, message_id=buy_id),
+        ], tx_events=tx_events)})
+
+        await self._status_update()
+        await self._run_until(
+            lambda: "OID-SELL" in self._event_ids(MarketEvent.SellOrderCompleted)
+            and "OID-BUY" in self._event_ids(MarketEvent.BuyOrderCompleted),
+            "the self-fill did not complete both legs",
+        )
+
+        fees = {fill.order_id: fill.trade_fee.flat_fees for fill in self.events[MarketEvent.OrderFilled].event_log}
+        self.assertEqual({
+            "OID-SELL": [TokenAmount("BZE", Decimal("0.001"))],
+            "OID-BUY": [TokenAmount("BZE", Decimal("0.001"))],
+        }, fees)
+
     async def test_restart_resumes_a_create_from_its_saved_tx_height(self):
         pending = InFlightOrder(
             client_order_id="OID-SAVED", trading_pair="BZE-USDC", order_type=OrderType.LIMIT, trade_type=TradeType.SELL,

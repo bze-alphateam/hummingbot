@@ -34,6 +34,8 @@ TICK = Decimal("0.0001")
 BASE_STEP = Decimal("0.000001")
 MAKER_FEE = Decimal("0.001")
 TAKER_FEE = Decimal("0.1")
+# Gas of one self-fill cycle's tx on testnet.
+CYCLE_GAS = Decimal("0.00315")
 # 2026-10-28 12:00:00 UTC: 43,200 s left in the day, i.e. 144 cycles of 300 s.
 NOON = datetime(2026, 10, 28, 12, tzinfo=timezone.utc).timestamp()
 EXAMPLE = Path(__file__).resolve().parents[5] / "conf" / "scripts" / "beezee_volume_target.yml.example"
@@ -185,10 +187,11 @@ class BeezeeVolumeTargetTests(unittest.IsolatedAsyncioTestCase):
         ))
 
     def _self_fill(self, batch: List[FakeOrder], height: int):
-        """Both legs of a batch match each other: one trade, the second leg is the taker."""
+        """Both legs of a batch match each other: one trade, the second leg is the taker. Both were signed while the
+        other was not on the book yet, so the connector reports the maker fee on each."""
         maker, taker = batch
         self._fill(maker, maker.amount, f"{height}-0-maker", MAKER_FEE)
-        self._fill(taker, taker.amount, f"{height}-0-taker", TAKER_FEE)
+        self._fill(taker, taker.amount, f"{height}-0-taker", MAKER_FEE)
         maker.is_done = taker.is_done = True
 
     def _status_value(self, strategy: BeezeeVolumeTarget, label: str) -> str:
@@ -479,11 +482,11 @@ class BeezeeVolumeTargetTests(unittest.IsolatedAsyncioTestCase):
     # === Costs ===
 
     async def test_fee_cap_stops_the_day_and_resets_at_utc_midnight(self):
-        strategy = self._strategy(max_daily_fee_spend=Decimal("0.3"))
+        strategy = self._strategy(max_daily_fee_spend=Decimal("0.202"))
         await self._run_until(NOON)
         self._self_fill(self._last_batch(), 1)
         self.connector.gas_paid = Decimal("0.2")
-        # 0.101 tradebin + 0.2 gas >= 0.3.
+        # 0.002 tradebin + 0.2 gas >= 0.202.
         await self._run_until(NOON + 300)
         self.assertEqual(1, len(self.connector.batches))
         self.assertIn("fee cap", strategy._last_skip_reason)
@@ -496,7 +499,7 @@ class BeezeeVolumeTargetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Decimal("0"), strategy.spend_today)
 
     async def test_spend_below_the_cap_keeps_trading(self):
-        self._strategy(max_daily_fee_spend=Decimal("0.302"))
+        self._strategy(max_daily_fee_spend=Decimal("0.2021"))
         await self._run_until(NOON)
         self._self_fill(self._last_batch(), 1)
         self.connector.gas_paid = Decimal("0.2")
@@ -504,14 +507,44 @@ class BeezeeVolumeTargetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(2, len(self.connector.batches))
 
     async def test_tradebin_fees_alone_reach_the_cap(self):
-        strategy = self._strategy(max_daily_fee_spend=Decimal("0.202"))
+        strategy = self._strategy(max_daily_fee_spend=Decimal("0.004"))
         await self._run_until(NOON)
         self._self_fill(self._last_batch(), 1)
         await self._run_until(NOON + 300)
         self._self_fill(self._last_batch(), 2)
         await self._run_until(NOON + 600)
         self.assertEqual(2, len(self.connector.batches))
-        self.assertEqual(Decimal("0.202"), strategy.spend_today)
+        self.assertEqual(Decimal("0.004"), strategy.spend_today)
+
+    async def test_self_fill_cycle_costs_two_maker_fees_plus_gas_and_the_cap_stops_on_that_spend(self):
+        cycle_cost = 2 * MAKER_FEE + CYCLE_GAS
+        strategy = self._strategy(max_daily_fee_spend=3 * cycle_cost)
+        await self._run_until(NOON)
+        self._self_fill(self._last_batch(), 1)
+        self.connector.gas_paid += CYCLE_GAS
+        self.assertEqual(cycle_cost, strategy.spend_today)
+        for cycle in (1, 2):
+            await self._run_until(NOON + cycle * 300)
+            self._self_fill(self._last_batch(), cycle + 1)
+            self.connector.gas_paid += CYCLE_GAS
+        self.assertEqual(3, len(self.connector.batches))
+        self.assertEqual(3 * cycle_cost, strategy.spend_today)
+
+        await self._run_until(NOON + 900)
+        self.assertEqual(3, len(self.connector.batches))
+        self.assertIn("fee cap", strategy._last_skip_reason)
+
+    async def test_fill_reported_after_the_cancel_of_its_order_does_not_add_a_second_fee(self):
+        strategy = self._strategy()
+        await self._run_until(NOON)
+        sell, buy = self._last_batch()
+        self.connector.trigger_event(MarketEvent.BuyOrderCreated, BuyOrderCreatedEvent(
+            self.now, OrderType.LIMIT, PAIR, buy.amount, buy.price, buy.client_order_id, self.now, "AB" * 32
+        ))
+        # The cancel lands first; the fill the order had before it is read back afterwards with the order's fee.
+        self.connector.trigger_event(MarketEvent.OrderCancelled, OrderCancelledEvent(self.now, buy.client_order_id))
+        self._fill(buy, buy.amount / 2, "7-0-maker", MAKER_FEE)
+        self.assertEqual(MAKER_FEE, strategy.spend_today)
 
     async def test_cancelled_leg_that_never_filled_costs_its_maker_fee(self):
         strategy = self._strategy()
@@ -533,7 +566,7 @@ class BeezeeVolumeTargetTests(unittest.IsolatedAsyncioTestCase):
         self._self_fill(self._last_batch(), 1)
         self.connector.gas_paid = Decimal("0.05")
         filled = self._last_batch()[0].amount * Decimal("335")
-        expected = (Decimal("0.151") / filled * 1000).quantize(Decimal("0.000001"))
+        expected = (Decimal("0.052") / filled * 1000).quantize(Decimal("0.000001"))
         self.assertEqual(f"{expected} BZE", self._status_value(strategy, "Cost per 1,000"))
 
     # === Leftover legs and filled volume ===
