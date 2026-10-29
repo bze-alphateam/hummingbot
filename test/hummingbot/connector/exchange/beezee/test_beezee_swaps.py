@@ -83,7 +83,7 @@ class BeezeeSwapMathTests(unittest.TestCase):
 
         # 0.25 treasury and 0.25 burner, each truncated from the whole fee.
         self.assertEqual(1500, swap_fee_to_pool(pool, 3000))
-        self.assertEqual(4, swap_fee_to_pool(pool, 7))  # treasury 1, burner 1
+        self.assertEqual(5, swap_fee_to_pool(pool, 7))  # treasury 1, burner 1 (1.75 each, truncated)
         self.assertEqual(0, swap_fee_to_pool(pool, 0))
         no_destination = BeezeePool.from_data({**pool_data(), "fee_dest": {}})
         self.assertEqual(3000, swap_fee_to_pool(no_destination, 3000))
