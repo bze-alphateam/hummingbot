@@ -76,7 +76,7 @@ class RestartedPmmMixin:
             {"denom": "ubze", "amount": "1000000000"}, {"denom": USDC, "amount": "1000000000"},
         ]})
 
-    def _restored(self, client_order_id: str, order_id: str, is_buy: bool, price: Decimal,
+    def _restored(self, client_order_id: str, order_id: Optional[str], is_buy: bool, price: Decimal,
                   trading_pair: str = "BZE-USDC", amount: Decimal = Decimal("10")) -> InFlightOrder:
         return InFlightOrder(
             client_order_id=client_order_id, trading_pair=trading_pair, order_type=OrderType.LIMIT,
@@ -264,3 +264,90 @@ class BeezeeRestartFillWhileDownTests(RestartedPmmMixin, BeezeeChainTestCase):
         self.assertEqual({}, self.exchange.in_flight_orders)
         self.assertTrue(self._pmm_logged(logging.INFO, "(BZE-USDC) Maker buy order of 10"))
         self.assertFalse(any("Creating" in record.getMessage() for record in self.pmm_logs))
+
+
+class BeezeeRestoredWithoutTxTests(RestartedPmmTestCase):
+    """Stopped while a batch of creates was on its way, before its tx hash was known: the saved orders have neither
+    a tx nor an order id, and are resolved against the account's resting orders on the first update."""
+
+    BOOK_ID = "000000000000000006810004"
+
+    def _unsent(self, client_order_id: str, is_buy: bool = True, price: Decimal = MID) -> InFlightOrder:
+        order = self._restored(client_order_id, None, is_buy, price)
+        order.current_state = OrderState.PENDING_CREATE
+        return order
+
+    def _book_order(self, order_id: str, amount: str):
+        self.node.resting[order_id] = SentMessage("create", BZE_USDC, "buy", amount=amount, price=str(MID))
+        self._mock_market_order(order_id, amount, str(MID))
+
+    async def _restart_without_tx(self, orders: List[InFlightOrder]):
+        self._restore(orders, {"last_processed_height": H, "creates": {}, "cancels": {}})
+        await self._status_update()
+        await self._settle()
+
+    async def test_order_with_no_match_on_the_book_fails(self):
+        await self._restart_without_tx([self._unsent("OID-LOST")])
+
+        self.assertEqual(["OID-LOST"], self._event_ids(MarketEvent.OrderFailure))
+        self.assertNotIn("OID-LOST", self.exchange.in_flight_orders)
+        self.assertTrue(self._logged(logging.WARNING, "Beezee order OID-LOST was saved before its create tx was known"))
+
+    async def test_order_matching_a_book_order_rests_with_its_id_and_cancels_it(self):
+        self._book_order(self.BOOK_ID, "10000000")
+        await self._restart_without_tx([self._unsent("OID-FOUND")])
+
+        self.assertEqual((self.BOOK_ID, OrderState.OPEN), (self._exchange_id("OID-FOUND"), self._state("OID-FOUND")))
+        self.assertEqual([], self._event_ids(MarketEvent.OrderFailure))
+
+        self.exchange.cancel("BZE-USDC", "OID-FOUND")
+        await self._settle()
+        self.windows.pop(0).set_result(None)
+        await self._settle()
+
+        self.assertEqual(
+            [[("cancel", BZE_USDC, self.BOOK_ID)]],
+            [[(m.kind, m.market_id, m.order_id) for m in sent.messages] for _, sent in self.node.landed],
+        )
+        await self._run_until(lambda: "OID-FOUND" in self._event_ids(MarketEvent.OrderCancelled), "not cancelled")
+
+    async def test_partly_filled_book_order_is_taken_with_the_missed_fill(self):
+        self._book_order(self.BOOK_ID, "6000000")
+        await self._restart_without_tx([self._unsent("OID-PART")])
+
+        self.assertEqual((self.BOOK_ID, OrderState.PARTIALLY_FILLED), (self._exchange_id("OID-PART"), self._state("OID-PART")))
+        self.assertEqual([(Decimal("4"), MID)], [
+            (fill.amount, fill.price) for fill in self.events[MarketEvent.OrderFilled].event_log
+        ])
+
+    async def test_book_order_matches_only_one_of_two_identical_orders(self):
+        self._book_order(self.BOOK_ID, "10000000")
+        # A book order an adopted resting order already claims is no match either.
+        self._book_order(BID_ID, "10000000")
+        await self._restart_without_tx([
+            self._restored("OID-REST", BID_ID, True, MID), self._unsent("OID-ONE"), self._unsent("OID-TWO"),
+        ])
+
+        matched = [cid for cid in ("OID-ONE", "OID-TWO") if self._exchange_id(cid) == self.BOOK_ID]
+        self.assertEqual(1, len(matched))
+        self.assertEqual(OrderState.OPEN, self._state(matched[0]))
+        self.assertEqual({"OID-ONE", "OID-TWO"} - set(matched), set(self._event_ids(MarketEvent.OrderFailure)))
+        self.assertEqual((BID_ID, OrderState.OPEN), (self._exchange_id("OID-REST"), self._state("OID-REST")))
+
+    async def test_pmm_drops_failed_orders_and_places_new_ones(self):
+        orders = [
+            self._unsent("OID-BID", True, self._quote(MID * Decimal("0.99"))),
+            self._unsent("OID-ASK", False, self._quote(MID * Decimal("1.01"))),
+        ]
+        self._restore(orders, {"last_processed_height": H, "creates": {}, "cancels": {}})
+        strategy = self._pmm()
+
+        await self._tick(5)
+
+        self.assertEqual(["OID-ASK", "OID-BID"], sorted(self._event_ids(MarketEvent.OrderFailure)))
+        self.assertEqual(1, len(self.node.landed))
+        self.assertEqual(["create", "create"], self.node.landed[0][1].kinds)
+        new_ids = sorted(self.exchange.in_flight_orders)
+        self.assertEqual(2, len(new_ids))
+        self.assertFalse({"OID-BID", "OID-ASK"} & set(new_ids))
+        self.assertEqual(new_ids, self._active_ids(strategy))

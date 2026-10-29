@@ -299,7 +299,10 @@ several ticks apart (see "Seeding the book"). Checks:
   before its first tick, every open order on a pair it trades is adopted as if the strategy had placed it. PMM keeps
   an adopted level within `order_refresh_tolerance_pct` and replaces it otherwise, like its own orders, so a restart
   leaves one set of orders, never two. Orders still waiting for their chain id (killed right after the create tx) are
-  adopted too. Fills that happened while the bot was down are still read back and close or shrink the adopted order.
+  adopted too. An order stopped before its create tx was even sent has no tx and no id: on the first update it takes
+  an unclaimed order of this account on the book with its side, price and amount (or a smaller remaining amount, the
+  difference booked as one fill), else it is failed with a warning and the strategy places a new one. Fills that
+  happened while the bot was down are still read back and close or shrink the adopted order.
   An order on a pair the new config no longer trades is cancelled, logged at INFO. `max_order_age` counts from the
   restart for an adopted order. The adoption lives in the strategy base, so every strategy built on it gets it (tested
   with PMM); `beezee_volume_target.py` places its orders past that tracker, so it also counts the restored orders on
