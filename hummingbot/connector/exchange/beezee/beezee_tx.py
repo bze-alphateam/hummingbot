@@ -85,6 +85,12 @@ def msg_cancel_order(creator: str, market_id: str, order_id: str, order_type: st
     return _any_message("/bze.tradebin.MsgCancelOrder", payload)
 
 
+def msg_multi_swap(creator: str, routes: List[str], input_denom: str, input_amount: str, min_output_denom: str, min_output_amount: str) -> bytes:
+    payload = _encode_string(1, creator) + b"".join(_encode_string(2, route) for route in routes)
+    payload += _encode_bytes(3, _coin_message(input_denom, input_amount)) + _encode_bytes(4, _coin_message(min_output_denom, min_output_amount))
+    return _any_message("/bze.tradebin.MsgMultiSwap", payload)
+
+
 def build_signed_transaction(
     signer: BeezeeSigner,
     chain_id: str,
