@@ -1,0 +1,52 @@
+#########################################################
+###  Pool <-> order-book arbitrage: BZE/USDC.inj      ###
+#########################################################
+# Copy to conf/scripts/beezee_pool_book_arb.yml, set the sizes and reserves, then
+#   start --v2 beezee_pool_book_arb.yml
+# When the pair's order book sells below its liquidity pool price, the script takes those asks and sells the same
+# BZE on the pool; when the book buys above the pool price, it buys BZE on the pool and sells it into those bids.
+# Both legs go out in one tx (MsgFillOrders + MsgMultiSwap) and only when the arb keeps min_profit_pct after the pool
+# fee, both tradebin taker fees and the gas. One pair only: its own pool against its own book, no other route.
+# How it works and what it costs: README_BZE.md, section "Pool / order-book arbitrage".
+# Network: beezee-1. In `connect beezee` pick network `mainnet` (gas price 0.01 ubze).
+
+script_file_name: beezee_pool_book_arb.py
+controllers_config: []
+
+exchange: beezee
+
+# BZE quoted in USDC bridged from Injective (USDC.inj): market ubze/ibc/81DA528F…, pool ibc/81DA528F…_ubze.
+# USDC.inj has no display unit on chain, so the bot counts it in base units (1 = 0.000001 USDC). One side of the
+# pair must be BZE: the fees and the gas are paid in BZE and converted with the pair's own price.
+trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+
+# Profit an arb must keep after every fee, in % of what it spends. Every book level taken must also beat the pool
+# by this much at the size taken (pool fee and price impact included).
+min_profit_pct: 0.3
+
+# Largest arb, in BZE. Placeholder: size it to your inventory.
+max_trade_base: 2000
+
+# Balances the script never touches. Both legs spend what the wallet already holds: an arb that buys on the book
+# sells BZE it has on the pool, and one that buys on the pool sells BZE it has into the bids. So keep both BZE and
+# USDC.inj above these, plus BZE for the fees (2 x 0.1 BZE taker fee + gas per arb).
+reserve_base: 100
+reserve_quote: 0
+
+# The chain refuses the swap rather than pay out more than this % below the quote.
+slippage_pct: 0.5
+
+# A book fill refunded in part (the order it aimed at was taken first) leaves the inventory off by the refunded
+# amount, since the swap already ran in full. With rebalance_on_partial the next check swaps that amount back on the
+# pool once, if that costs at most max_rebalance_cost_pct % of its value; otherwise it is kept and shown in status.
+rebalance_on_partial: true
+max_rebalance_cost_pct: 1
+
+# Blocks to wait after a trade, so the book and the pool show it before the next one.
+cooldown_blocks: 2
+
+# Checked on every new block, and at least this often (seconds).
+check_interval_seconds: 10
+
+# Gas of one fill + swap tx in BZE, counted before sending: about 300,000 gas x 0.01 ubze = 0.003 BZE.
+estimated_gas_bze: 0.005
