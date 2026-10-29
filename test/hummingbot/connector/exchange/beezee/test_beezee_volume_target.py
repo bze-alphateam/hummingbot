@@ -74,6 +74,7 @@ class FakeBeezeeConnector(ConnectorBase):
         self.cancels: List[str] = []
         self.gas_paid = Decimal("0")
         self.chain_minimum = Decimal("0")
+        self.pool_price: Optional[Decimal] = None
         self.balances = {"BZE": Decimal("1000000000"), "USDC": Decimal("1000000000")}
         self.rules = {PAIR: TradingRule(PAIR, min_price_increment=TICK, min_base_amount_increment=BASE_STEP)}
         self._next_id = 0
@@ -96,6 +97,9 @@ class FakeBeezeeConnector(ConnectorBase):
 
     def get_order_book(self, trading_pair: str):
         return self.book
+
+    def get_pool_price(self, trading_pair: str) -> Optional[Decimal]:
+        return self.pool_price
 
     def gas_fees_paid(self) -> Decimal:
         return self.gas_paid
@@ -673,6 +677,9 @@ class BeezeeVolumeTargetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("334 (source: coingecko, age: 61s)", self._status_value(strategy, "Anchor"))
         self.assertEqual("335.0", self._status_value(strategy, "Book mid"))
         self.assertIn("/ 1000 BZE", self._status_value(strategy, "Spend today"))
+        self.assertEqual("-", self._status_value(strategy, "Pool price"))
+        self.connector.pool_price = Decimal("336.5")
+        self.assertEqual("336.5", self._status_value(strategy, "Pool price"))
 
     # === Example config ===
 

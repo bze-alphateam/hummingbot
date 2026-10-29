@@ -37,6 +37,8 @@ GET_TX_PATH_URL = "/cosmos/tx/v1beta1/txs"
 BROADCAST_TX_PATH_URL = "/cosmos/tx/v1beta1/txs"
 SIMULATE_TX_PATH_URL = "/cosmos/tx/v1beta1/simulate"
 HALTED_DENOMS_PATH_URL = "/bze/tradebin/halted_denoms"
+ALL_LIQUIDITY_POOLS_PATH_URL = "/bze/tradebin/all_liquidity_pools"
+LIQUIDITY_POOL_PATH_URL = "/bze/tradebin/liquidity_pool"
 # CometBFT RPC
 RPC_STATUS_PATH_URL = "/status"
 BLOCK_RESULTS_PATH_URL = "/block_results"
@@ -136,5 +138,7 @@ RATE_LIMITS = [
     RateLimit(limit_id=GET_TX_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
     RateLimit(limit_id=SIMULATE_TX_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
     RateLimit(limit_id=HALTED_DENOMS_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
+    RateLimit(limit_id=ALL_LIQUIDITY_POOLS_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
+    RateLimit(limit_id=LIQUIDITY_POOL_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
     RateLimit(limit_id=BROADCAST_TX_PATH_URL, limit=30, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(TX_LIMIT_ID, 1)]),
 ]

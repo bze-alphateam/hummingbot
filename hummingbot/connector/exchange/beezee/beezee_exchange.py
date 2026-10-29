@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hummingbot.connector.constants import s_decimal_NaN
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS, beezee_web_utils as web_utils
+from hummingbot.connector.exchange.beezee.beezee_amm import BeezeePool, BeezeePoolTracker, BeezeeSwapQuote
 from hummingbot.connector.exchange.beezee.beezee_api_data_source import (
     BeezeeAPIDataSource,
     BeezeeTxRefusedError,
@@ -129,6 +130,8 @@ class BeezeeExchange(ExchangePyBase):
         self._gas_adjustment = network.gas_adjustment
 
         self._data_source: Optional[BeezeeAPIDataSource] = None
+        self._pool_tracker: Optional[BeezeePoolTracker] = None
+        self._pool_refresh_task: Optional[asyncio.Task] = None
         self._trade_fees: Dict[str, Optional[TokenAmount]] = {}
         self._markets_by_trading_pair: Dict[str, BeezeeMarket] = {}
         self._halted_denoms: Set[str] = set()
@@ -279,6 +282,47 @@ class BeezeeExchange(ExchangePyBase):
                 rpc_endpoint=self._rpc_endpoint,
             )
         return self._data_source
+
+    def _build_pool_tracker(self) -> BeezeePoolTracker:
+        if self._pool_tracker is None:
+            self._pool_tracker = BeezeePoolTracker(
+                source=self._build_data_source(),
+                trading_pairs=lambda: list(self._trading_pairs or []),
+                halted_denoms=lambda: self._halted_denoms,
+            )
+        return self._pool_tracker
+
+    # === Liquidity pools (read only) ===
+
+    def get_pool(self, trading_pair: str) -> Optional[BeezeePool]:
+        """The trading pair's liquidity pool as of the last block, with its halted flag, or None."""
+        return self._build_pool_tracker().get_pool(trading_pair)
+
+    def get_pool_price(self, trading_pair: str) -> Optional[Decimal]:
+        """The pool price in the units of the pair's order prices (quote per base, display units), or None."""
+        return self._build_pool_tracker().get_pool_price(trading_pair)
+
+    def quote_swap(self, trading_pair: str, side: str, amount: Decimal) -> BeezeeSwapQuote:
+        """What the pool pays for `amount` of the input token: quote on a "buy", base on a "sell"."""
+        return self._build_pool_tracker().quote_swap(trading_pair, side, amount)
+
+    def quote_input_for_output(self, trading_pair: str, side: str, amount: Decimal) -> BeezeeSwapQuote:
+        """The swap that receives at least `amount` of the output token: base on a "buy", quote on a "sell"."""
+        return self._build_pool_tracker().quote_input_for_output(trading_pair, side, amount)
+
+    def _schedule_pool_refresh(self):
+        if not self._trading_pairs or (self._pool_refresh_task is not None and not self._pool_refresh_task.done()):
+            return
+        self._pool_refresh_task = safe_ensure_future(self._refresh_pools())
+
+    async def _refresh_pools(self):
+        try:
+            await self._update_halted_denoms_if_due()
+            await self._build_pool_tracker().refresh()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.logger().warning(f"Failed to refresh Beezee liquidity pools. Keeping the last known reserves. Error: {error}")
 
     def _create_web_assistants_factory(self) -> WebAssistantsFactory:
         return web_utils.build_api_factory(throttler=self._throttler, auth=self._auth)
@@ -626,6 +670,9 @@ class BeezeeExchange(ExchangePyBase):
         await super().stop_network()
         # Tx lookups and halt cancels are restarted from the saved state by the next status update.
         self._order_batcher.stop()
+        if self._pool_refresh_task is not None:
+            self._pool_refresh_task.cancel()
+            self._pool_refresh_task = None
         tasks = list(self._tx_lookup_tasks.values()) + list(self._halt_cancel_tasks.values())
         for task in tasks + list(self._tx_fetch_tasks.values()) + list(self._deferred_cancel_tasks.values()):
             task.cancel()
@@ -940,6 +987,7 @@ class BeezeeExchange(ExchangePyBase):
         return None
 
     def _on_new_block(self):
+        self._schedule_pool_refresh()
         if self.is_trading_required and not self._block_processing_lock.locked():
             safe_ensure_future(self._update_order_status())
 

@@ -214,7 +214,8 @@ Each cycle:
    cycle is skipped. Otherwise `p = clamp(anchor, b + t, a - t)`, rounded down to the tick.
 4. **Costs.** Fees and gas are counted in BZE. Reaching `max_daily_fee_spend` stops it until UTC midnight.
 
-`status` shows the target, filled and remaining volume, the anchor with its source and age, the book mid, the day's
+`status` shows the target, filled and remaining volume, the anchor with its source and age, the book mid, the pool
+price (see "Pools"), the day's
 fees + gas, the cost per 1,000 quote units of volume and why the last cycle skipped.
 
 **Anchor.** Where in the spread the trades print, which becomes the chart price and reaches CoinGecko through the
@@ -259,6 +260,36 @@ several ticks apart (see "Seeding the book"). Checks:
 - [ ] A spread of one tick (or an empty side) skips the cycle with that reason in `status`.
 - [ ] Take one leg from a second wallet before it fills: the next cycle cancels the other leg, and only the filled
       amount counts.
+
+## Pools
+
+The connector reads the tradebin liquidity pools (AMM) of the pairs it trades. Nothing is sent to the chain for this.
+
+- **Which pool.** A pair has at most one pool, whose id is its two denoms sorted and joined by `_`. Hummingbot pairs
+  follow the order-book market (`base/quote`), so the pool's base can be the pair's quote: BZE-USDC (market
+  `ubze/ibc/81DA…`) trades against pool `ibc/81DA…_ubze`. The connector reads reserves by denom, so every price and
+  quote comes out in the pair's own orientation.
+- **Refresh.** All pools are read once, then the pools of the traded pairs on every new block. A failed read keeps
+  the last reserves and logs a warning. A pool is halted while either of its denoms is in the halted list (the same
+  list the order book uses).
+- **Pool price.** `connector.get_pool_price(trading_pair)` is the pool's quote reserve over its base reserve, in the
+  units of the pair's order prices (display units, quote per base), so it compares directly with the book. `None`
+  when there is no pool or it is empty. `connector.get_pool(trading_pair)` gives the pool itself (reserves in base
+  units, fee, `halted`).
+- **Quotes.** `connector.quote_swap(trading_pair, side, amount)` tells what a swap of `amount` input pays out: on
+  `"buy"` the input is quote and the output base, on `"sell"` the reverse. `connector.quote_input_for_output(...)`
+  starts from the output wanted (base on a buy, quote on a sell) and returns the input that gets at least that much.
+  Both return `input`, `output`, `fee` (the pool fee, taken from the input), `effective_price` (quote per base, fee
+  included) and `price_impact_pct` (how much worse than the pool price, fee included), plus the same amounts in base
+  units. The math is the chain's own (v8.2.0 `service_amm.go`, including its 18-decimal rounding), checked to the
+  unit against the chain code on recorded mainnet pools. A quote the chain would refuse comes back with `ok` false
+  and the reason in `error`: a halted pool (`halted` true), an amount too small to pay any pool fee, an output the
+  pool cannot pay. The flat tradebin taker fee a swap tx also pays is not in the quote.
+- **Pool price as a price source.** `BeezeePoolPriceDelegate(connector, trading_pair)`
+  (`hummingbot.connector.exchange.beezee.beezee_pool_price_delegate`) is an asset price delegate that returns the
+  pool price for every price type (a pool has no spread), NaN while there is none. A strategy or script that takes an
+  `AssetPriceDelegate`, such as pure market making's `asset_price_delegate`, uses it in place of the order-book mid.
+  It is `ready` once the connector is ready and the pool has a price.
 
 ## Connector behaviour on chain v8.2.0
 

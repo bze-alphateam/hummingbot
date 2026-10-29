@@ -321,6 +321,19 @@ class BeezeeAPIDataSource:
             return mid_price if mid_price.is_finite() and mid_price > Decimal("0") else None
         return None
 
+    async def get_all_liquidity_pools(self) -> List[Dict[str, Any]]:
+        return await self._paged_request(CONSTANTS.ALL_LIQUIDITY_POOLS_PATH_URL, "list")
+
+    async def get_liquidity_pool(self, pool_id: str) -> Optional[Dict[str, Any]]:
+        """The pool, or None when the chain says there is none. Other errors raise."""
+        try:
+            response = await self._request(CONSTANTS.LIQUIDITY_POOL_PATH_URL, params={"pool_id": pool_id})
+        except IOError as error:
+            if is_not_found_error(error):
+                return None
+            raise
+        return response.get("pool")
+
     async def get_balances(self) -> List[Dict[str, Any]]:
         if self._account_address is None:
             return []

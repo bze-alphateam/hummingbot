@@ -1,0 +1,120 @@
+{
+  "list": [
+    {
+      "id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "base": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "quote": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "lp_denom": "ulp/DD05723298B4D20BEB042D01D2497915BC4B15446AB59DA4CD26BFCD77C78DD2",
+      "creator": "bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77",
+      "fee": "0.002000000000000000",
+      "fee_dest": {
+        "treasury": "0.250000000000000000",
+        "burner": "0.250000000000000000",
+        "providers": "0.500000000000000000"
+      },
+      "reserve_base": "8111426275",
+      "reserve_quote": "2256884488380",
+      "stable": false
+    },
+    {
+      "id": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "base": "factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl",
+      "quote": "ubze",
+      "lp_denom": "ulp_factory/bze13gzq40che93tgfm9kzmkpjamah5nj0j73pyhqk/uvdl_ubze",
+      "creator": "bze1dte8cgjyxnsg4zmrlhfv4h4hnxv5vy8khzfx4f",
+      "fee": "0.002000000000000000",
+      "fee_dest": {
+        "treasury": "0.000000000000000000",
+        "burner": "0.500000000000000000",
+        "providers": "0.500000000000000000"
+      },
+      "reserve_base": "1641574536600",
+      "reserve_quote": "2054600421695",
+      "stable": false
+    },
+    {
+      "id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ibc/ED07A3391A112B175915CD8FAF43A2DA8E4790EDE12566649D0C2F97716B8518",
+      "base": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "quote": "ibc/ED07A3391A112B175915CD8FAF43A2DA8E4790EDE12566649D0C2F97716B8518",
+      "lp_denom": "ulp/4894F10BD8ADF0AA8F158A499C476EC4FBAD4661834DD3FE9BF59B828C94E306",
+      "creator": "bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77",
+      "fee": "0.002000000000000000",
+      "fee_dest": {
+        "treasury": "0.250000000000000000",
+        "burner": "0.250000000000000000",
+        "providers": "0.500000000000000000"
+      },
+      "reserve_base": "5149577445066",
+      "reserve_quote": "150252973",
+      "stable": false
+    },
+    {
+      "id": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL_ubze",
+      "base": "factory/bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77/CTL",
+      "quote": "ubze",
+      "lp_denom": "ulp/072C05CF6D235FA4D564EC9B564C1D67614A5A55E67935E1977483F940B85209",
+      "creator": "bze1972aqfzdg29ugjln74edx0xvcg4ehvysjptk77",
+      "fee": "0.002000000000000000",
+      "fee_dest": {
+        "treasury": "0.250000000000000000",
+        "burner": "0.250000000000000000",
+        "providers": "0.500000000000000000"
+      },
+      "reserve_base": "3103930029116",
+      "reserve_quote": "13614809977",
+      "stable": false
+    },
+    {
+      "id": "ibc/6490A7EAB61059BFC1CDDEB05917DD70BDF3A611654162A1A47DB930D40D8AF4_ubze",
+      "base": "ibc/6490A7EAB61059BFC1CDDEB05917DD70BDF3A611654162A1A47DB930D40D8AF4",
+      "quote": "ubze",
+      "lp_denom": "ulp_ibc/6490A7EAB61059BFC1CDDEB05917DD70BDF3A611654162A1A47DB930D40D8AF4_ubze",
+      "creator": "bze1dte8cgjyxnsg4zmrlhfv4h4hnxv5vy8khzfx4f",
+      "fee": "0.001000000000000000",
+      "fee_dest": {
+        "treasury": "0.000000000000000000",
+        "burner": "0.000000000000000000",
+        "providers": "1.000000000000000000"
+      },
+      "reserve_base": "0",
+      "reserve_quote": "0",
+      "stable": false
+    },
+    {
+      "id": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838_ubze",
+      "base": "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838",
+      "quote": "ubze",
+      "lp_denom": "ulp/0B3E395B3E5C92DDAC1652D0407102BEEF714BFF6D36A88546D65F7A8B32D693",
+      "creator": "bze1jx4x3kn8mlz2s03zdpf2a38x9gl66llvjqdd55",
+      "fee": "0.001000000000000000",
+      "fee_dest": {
+        "treasury": "0.000000000000000000",
+        "burner": "0.000000000000000000",
+        "providers": "1.000000000000000000"
+      },
+      "reserve_base": "2259377361",
+      "reserve_quote": "6734458480288",
+      "stable": false
+    },
+    {
+      "id": "ibc/82931180F0962712BFABB189083A94C77EA90E269ABFC6D310AF922B2B14E011_ubze",
+      "base": "ibc/82931180F0962712BFABB189083A94C77EA90E269ABFC6D310AF922B2B14E011",
+      "quote": "ubze",
+      "lp_denom": "ulp_ibc/82931180F0962712BFABB189083A94C77EA90E269ABFC6D310AF922B2B14E011_ubze",
+      "creator": "bze1dte8cgjyxnsg4zmrlhfv4h4hnxv5vy8khzfx4f",
+      "fee": "0.001000000000000000",
+      "fee_dest": {
+        "treasury": "0.000000000000000000",
+        "burner": "0.000000000000000000",
+        "providers": "1.000000000000000000"
+      },
+      "reserve_base": "21863848053",
+      "reserve_quote": "932687881388",
+      "stable": false
+    }
+  ],
+  "pagination": {
+    "next_key": null,
+    "total": "0"
+  }
+}

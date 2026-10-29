@@ -440,6 +440,7 @@ class BeezeeVolumeTarget(StrategyV2Base):
             return "Market connectors are not ready."
         quote = self.config.trading_pair.split("-", 1)[1]
         filled = self._filled_quote_today
+        pool_price = self.connector.get_pool_price(self.config.trading_pair)
         cost_per_1000 = self.spend_today / filled * 1000 if filled > 0 else None
         age = self.anchor_age
         lines = [
@@ -449,6 +450,7 @@ class BeezeeVolumeTarget(StrategyV2Base):
             f"  Anchor: {self._anchor if self._anchor is not None else '-'} "
             f"(source: {self._last_anchor_source or '-'}, age: {f'{age:.0f}s' if age is not None else '-'})",
             f"  Book mid: {self._last_book_mid if self._last_book_mid is not None else '-'}",
+            f"  Pool price: {f'{pool_price:.10g}' if pool_price is not None else '-'}",
             f"  Spend today: {self._tradebin_fees_today} tradebin fees + {self.gas_today} gas = "
             f"{self.spend_today} / {self.config.max_daily_fee_spend} BZE",
             f"  Cost per 1,000 {quote} of volume: {f'{cost_per_1000:.6f} BZE' if cost_per_1000 is not None else '-'}",
