@@ -315,6 +315,42 @@ The connector reads the tradebin liquidity pools (AMM) of the pairs it trades. N
     cancelled. A swap still waiting for its tx when the bot stops is settled from that tx after the restart.
   It is `ready` once the connector is ready and the pool has a price.
 
+## Taker fills
+
+A taker fill takes resting orders off the order book at exactly their prices with one `MsgFillOrders`. Unlike a
+crossing limit order, it never leaves an order resting: what does not match at that exact price is refunded.
+
+- **Which levels.** `connector.levels_to_take(trading_pair, side, max_amount, worst_price)` returns `(price, amount)`
+  levels, best first, from the last order book read: on `"buy"` the asks up to `worst_price`, on `"sell"` the bids
+  down to it, at most `max_amount` base in total (display units). The prices are the chain's own strings, so they
+  match exactly, even with 18 decimals (the Hummingbot order book keeps floats, which cannot). The list stops before
+  a part of a level below the chain minimum amount there, and at 50 levels. Empty until the book was read once.
+- **Sending.** `connector.fill_orders(trading_pair, side, levels)` takes those levels in one message. `side` is ours:
+  `"buy"` takes resting sells, `"sell"` takes resting buys (the message's `order_type` is the resting side). Amounts
+  are rounded down to whole base units and levels at the same price merged. A level below the chain minimum at its
+  price (`ceil(1 / price) × 2` base units) is dropped and logged, since the chain would skip it silently. Returns one
+  client order id per entry sent. The message goes through the order batcher like creates and cancels, so it can
+  share a tx with them; gas is simulated (a fill pays `FillOrdersExtraGas` growing with its entries, which the
+  simulation counts). It is not cancellable.
+  - *Refused up front* (a `BeezeeFillError`, nothing tracked, nothing sent): no wallet, an unknown pair, a halted
+    market, a level with a non-positive price or amount, more than 50 entries, or every level below the minimum.
+- **Fill and swap in one tx.** `connector.fill_orders_and_swap(trading_pair, side, levels, [BeezeeSwapRequest(...)])`
+  sends the `MsgFillOrders` and then one `MsgMultiSwap` per swap in a single tx (not batched), e.g. buying on the book
+  and selling the same amount on the pool. The tx passes or fails as a whole. The swaps settle in the tx; the fill
+  settles at the end of the block and may be refunded in part, which the swaps cannot follow. Returns the fill's and
+  the swaps' client order ids.
+- **Tracked as taker orders.** Each entry is a limit order at its price and amount (exchange id = the tx hash),
+  followed by its own queue `message_id` like a create. Every match is an `OrderFilledEvent`. The taker fee is paid
+  once per message, so it goes on the first fill of any of its entries. Once the chain has processed the message, an
+  entry that got its full amount is completed; otherwise it ends `CANCELED` with the fills it got (the rest was
+  refunded), and the balances are read again. Chain v8.3.0 announces the refund with `OrderMessageRefundedEvent`.
+  v8.2.0 emits nothing for it, so a fill that matched nothing leaves no event at all: the connector then reads the
+  tradebin queue store at the block height (RPC `abci_query`) and takes the message as processed once it is gone.
+  An entry with no outcome within 20 blocks fails with a warning. A fill in flight at a stop is resumed from its tx
+  after the restart; one stopped before its tx was known fails, since whether it was sent is unknown.
+- **Matching your own orders.** The chain fills the resting orders at a price in their order, whoever placed them,
+  so a fill at a price where this wallet also rests an order may take that order too.
+
 ## Connector behaviour on chain v8.2.0
 
 - **Wallet modes.** `wallet` takes a hex private key. `wallet_mnemonic` takes a BIP39 mnemonic (optional passphrase)

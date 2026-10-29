@@ -65,7 +65,7 @@ def _first(fields: List[Tuple[int, Any]], number: int, default: Any = None) -> A
 
 @dataclass
 class SentMessage:
-    kind: str  # "create", "cancel" or "swap"
+    kind: str  # "create", "cancel", "swap" or "fill"
     market_id: str  # the pool id for a swap
     order_type: str
     amount: Optional[str] = None
@@ -76,6 +76,8 @@ class SentMessage:
     input_denom: Optional[str] = None
     min_output_denom: Optional[str] = None
     min_output: Optional[str] = None
+    # Fills: the (price, amount) entries; `order_type` is the side of the resting orders taken.
+    entries: Optional[List[Tuple[str, str]]] = None
 
 
 @dataclass
@@ -109,6 +111,15 @@ def decode_tx(request_kwargs: Dict[str, Any]) -> SentTx:
                 min_output_denom=min_out[1], min_output=min_out[2],
             ))
             continue
+        if type_url == "/bze.tradebin.MsgFillOrders":
+            assert _first(payload, 1).decode() == ADDRESS
+            entries = []
+            for number, value in payload:
+                if number == 4:
+                    item = {item_number: item_value.decode() for item_number, item_value in _fields(value)}
+                    entries.append((item[1], item[2]))
+            messages.append(SentMessage("fill", _first(payload, 2).decode(), _first(payload, 3).decode(), entries=entries))
+            continue
         text = {number: value.decode() for number, value in payload}
         if type_url == "/bze.tradebin.MsgCreateOrder":
             assert text[1] == ADDRESS
@@ -127,7 +138,9 @@ class FakeNode:
 
     Each broadcast tx lands in its own block. Its create messages queue with message ids 0.. in message order and rest
     in that block with ids from 6820000 on; its cancels cancel their orders in that block; its swaps pay exactly their
-    minimum output in the tx.
+    minimum output in the tx. A fill queues one message per entry and takes, in its block, what `taker_book` (other
+    makers' resting orders) holds at exactly that price; like chain v8.2.0 it emits nothing for the refunded rest, and
+    every queue message is processed (gone from the queue) in its own block.
     """
 
     sequence: int = 3
@@ -141,6 +154,8 @@ class FakeNode:
     txs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     resting: Dict[str, SentMessage] = field(default_factory=dict)
     next_order_id: int = 6820000
+    # (market id, resting side, price) -> base amount other makers rest there, for fills.
+    taker_book: Dict[Tuple[str, str, Decimal], int] = field(default_factory=dict)
     # While set, a broadcast reaches the node but its answer waits for this future.
     check_tx_gate: Optional[asyncio.Future] = None
     # While set, a simulation reaches the node but its answer waits for this future.
@@ -192,9 +207,29 @@ class FakeNode:
     def _execute(self, tx_hash: str, sent: SentTx):
         height = self.height
         tx_events, block_events = [], []
+        # Queue message ids in queue order: one per create and cancel, one per fill entry (swaps do not queue).
+        queued = iter(range(1000))
         for msg_index, message in enumerate(sent.messages):
-            message_id = f"{msg_index:024d}"
-            if message.kind == "swap":
+            message_id = f"{next(queued):024d}" if message.kind in ("create", "cancel") else None
+            if message.kind == "fill":
+                our_side = "buy" if message.order_type == "sell" else "sell"
+                for price, amount in message.entries:
+                    message_id = f"{next(queued):024d}"
+                    tx_events.append(tx_event(
+                        "OrderCreateMessageEvent", msg_index, creator=ADDRESS, market_id=message.market_id,
+                        order_type=our_side, amount=amount, price=price, message_id=message_id,
+                    ))
+                    key = (message.market_id, message.order_type, Decimal(price))
+                    taken = min(int(amount), self.taker_book.get(key, 0))
+                    if taken:
+                        self.taker_book[key] -= taken
+                        block_events.append(block_event(
+                            "OrderExecutedEvent", id=f"{self.next_order_id:024d}", market_id=message.market_id,
+                            order_type=message.order_type, amount=str(taken), price=price, maker="bze1maker",
+                            taker=ADDRESS, message_id=message_id,
+                        ))
+                        self.next_order_id += 1
+            elif message.kind == "swap":
                 tx_events.append(tx_event("SwapEvent", msg_index, **{
                     "creator": ADDRESS, "pool_id": message.market_id,
                     "in": {"denom": message.input_denom, "amount": message.amount},
@@ -242,6 +277,10 @@ class FakeNode:
             return CallbackResult(status=404, payload={"code": 5, "message": "tx not found"})
         return CallbackResult(payload=response)
 
+    def abci_query(self, url, **kwargs) -> CallbackResult:
+        # Every queue message is processed in its own block, so the queue is empty at every height.
+        return CallbackResult(payload={"jsonrpc": "2.0", "id": -1, "result": {"response": {"code": 0, "value": None}}})
+
     def status(self, url, **kwargs) -> CallbackResult:
         return CallbackResult(payload={
             "jsonrpc": "2.0", "id": -1, "result": {"sync_info": {"latest_block_height": str(self.height)}},
@@ -287,6 +326,7 @@ class BeezeeBatchingTestCase(BeezeeChainTestCase):
         api.get(re.compile(rf"^{re.escape(REST_URL + CONSTANTS.GET_TX_PATH_URL)}/.*$"), repeat=True, callback=self.node.get_tx)
         api.get(f"{RPC_URL}{CONSTANTS.RPC_STATUS_PATH_URL}", repeat=True, callback=self.node.status)
         api.get(re.compile(rf"^{re.escape(RPC_URL + CONSTANTS.BLOCK_RESULTS_PATH_URL)}\?.*$"), repeat=True, callback=self.node.block_results)
+        api.get(re.compile(rf"^{re.escape(RPC_URL + CONSTANTS.ABCI_QUERY_PATH_URL)}\?.*$"), repeat=True, callback=self.node.abci_query)
         api.get(
             re.compile(rf"^{re.escape(REST_URL)}/bze/tradebin/user_market_orders/{ADDRESS}(\?.*)?$"),
             repeat=True, callback=self.node.user_market_orders,

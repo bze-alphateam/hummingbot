@@ -1,6 +1,6 @@
 import base64
 from decimal import Decimal
-from typing import Dict, List
+from typing import Dict, List, Sequence, Tuple
 
 from hummingbot.connector.exchange.beezee.beezee_signer import BeezeeSigner
 
@@ -89,6 +89,13 @@ def msg_multi_swap(creator: str, routes: List[str], input_denom: str, input_amou
     payload = _encode_string(1, creator) + b"".join(_encode_string(2, route) for route in routes)
     payload += _encode_bytes(3, _coin_message(input_denom, input_amount)) + _encode_bytes(4, _coin_message(min_output_denom, min_output_amount))
     return _any_message("/bze.tradebin.MsgMultiSwap", payload)
+
+
+def msg_fill_orders(creator: str, market_id: str, order_type: str, orders: Sequence[Tuple[str, str]]) -> bytes:
+    """`orders` are (price, amount) pairs. `order_type` is the side of the resting orders being filled."""
+    payload = _encode_string(1, creator) + _encode_string(2, market_id) + _encode_string(3, order_type)
+    payload += b"".join(_encode_bytes(4, _encode_string(1, price) + _encode_string(2, amount)) for price, amount in orders)
+    return _any_message("/bze.tradebin.MsgFillOrders", payload)
 
 
 def build_signed_transaction(
