@@ -181,7 +181,7 @@ class FakeArbConnector(ConnectorBase):
         return self.swap_results.get(client_order_id)
 
 
-class BeezeePoolBookArbTests(unittest.TestCase):
+class BeezeePoolBookArbTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         # BZE as the quote: fees count 1:1.
         self.connector = FakeArbConnector("TOKEN", "BZE")
@@ -270,14 +270,14 @@ class BeezeePoolBookArbTests(unittest.TestCase):
 
     # === Profitability ===
 
-    def test_no_trade_when_the_gap_is_within_the_pool_fee(self):
+    async def test_no_trade_when_the_gap_is_within_the_pool_fee(self):
         self.connector.asks = [(Decimal("0.998"), Decimal("100"))]
         strategy = self._strategy()
         self._run(2)
         self.assertEqual([], self.connector.sent)
         self.assertIn("below the pool fee + min_profit_pct", strategy._last_skip_reason)
 
-    def test_no_trade_when_the_fixed_fees_eat_the_gap(self):
+    async def test_no_trade_when_the_fixed_fees_eat_the_gap(self):
         # 1 TOKEN at 0.99: the pool pays about 0.997, i.e. 0.007 BZE gross, less than 0.205 BZE of fees.
         self.connector.asks = [(Decimal("0.99"), Decimal("1"))]
         strategy = self._strategy()
@@ -285,7 +285,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self.assertEqual([], self.connector.sent)
         self.assertIn("after fees, below min_profit_pct", strategy._last_skip_reason)
 
-    def test_no_trade_without_a_book_level_across_the_pool_price(self):
+    async def test_no_trade_without_a_book_level_across_the_pool_price(self):
         self.connector.asks = [(Decimal("1.01"), Decimal("100"))]
         self.connector.bids = [(Decimal("0.99"), Decimal("100"))]
         strategy = self._strategy()
@@ -294,7 +294,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self.assertIn("no ask below the pool price", strategy._last_skip_reason)
         self.assertIn("no bid above the pool price", strategy._last_skip_reason)
 
-    def test_book_to_pool_takes_the_asks_and_sells_the_base_on_the_pool_in_one_tx(self):
+    async def test_book_to_pool_takes_the_asks_and_sells_the_base_on_the_pool_in_one_tx(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         self._strategy(slippage_pct=Decimal("0.7"))
         self._run(2)
@@ -303,7 +303,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self.assertEqual([(Decimal("0.98"), Decimal("1000"))], levels)
         self.assertEqual(BeezeeSwapRequest("TOKEN-BZE", "sell", Decimal("1000"), Decimal("0.7")), request)
 
-    def test_pool_to_book_buys_on_the_pool_and_sells_into_the_bids(self):
+    async def test_pool_to_book_buys_on_the_pool_and_sells_into_the_bids(self):
         self.connector.bids = [(Decimal("1.02"), Decimal("1000"))]
         self._strategy()
         self._run(2)
@@ -315,7 +315,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         quote = self.connector.quote_input_for_output("TOKEN-BZE", "buy", Decimal("1000"))
         self.assertEqual(quote.input, request.amount)
 
-    def test_profit_subtracts_two_taker_fees_and_the_gas_with_bze_as_quote(self):
+    async def test_profit_subtracts_two_taker_fees_and_the_gas_with_bze_as_quote(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         strategy = self._strategy()
         self._run(2)
@@ -326,7 +326,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         # The pool fee is inside the pool's output; it is reported, not subtracted twice.
         self.assertEqual(Decimal("3") * Decimal("1"), plan.pool_fee_quote)
 
-    def test_profit_converts_the_fees_at_the_pool_price_with_bze_as_base(self):
+    async def test_profit_converts_the_fees_at_the_pool_price_with_bze_as_base(self):
         self.connector = FakeArbConnector("BZE", "USDC")
         # Pool price 0.5 USDC per BZE.
         self.connector.pool.reserve_quote = Decimal("500000")
@@ -341,7 +341,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         cost = self.connector.quote_input_for_output("BZE-USDC", "buy", Decimal("1000")).input
         self.assertEqual(Decimal("520") - cost - fixed, plan.net_profit)
 
-    def test_a_pair_without_bze_is_refused(self):
+    async def test_a_pair_without_bze_is_refused(self):
         self.connector = FakeArbConnector("TOKEN", "USDC")
         self.connector.asks = [(Decimal("0.9"), Decimal("1000"))]
         strategy = self._strategy()
@@ -351,7 +351,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
 
     # === Sizing ===
 
-    def test_sizing_stops_at_the_profitable_depth(self):
+    async def test_sizing_stops_at_the_profitable_depth(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000")), (Decimal("0.99"), Decimal("100000"))]
         self._strategy(max_trade_base=Decimal("1000000"))
         self._run(2)
@@ -372,7 +372,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
     def _pool_output(self, base_amount: Decimal) -> Decimal:
         return self.connector.quote_swap(self.connector.pair, "sell", base_amount).output
 
-    def test_sizing_stops_at_max_trade_base(self):
+    async def test_sizing_stops_at_max_trade_base(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         self._strategy(max_trade_base=Decimal("500"))
         self._run(2)
@@ -380,7 +380,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self.assertEqual([(Decimal("0.98"), Decimal("500"))], levels)
         self.assertEqual(Decimal("500"), request.amount)
 
-    def test_sizing_keeps_the_base_reserve(self):
+    async def test_sizing_keeps_the_base_reserve(self):
         self.connector.balances["TOKEN"] = Decimal("300")
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         self._strategy(reserve_base=Decimal("100"))
@@ -388,7 +388,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         [(_, levels, _)] = self.connector.sent
         self.assertEqual([(Decimal("0.98"), Decimal("200"))], levels)
 
-    def test_sizing_keeps_the_quote_reserve_and_the_bze_for_fees(self):
+    async def test_sizing_keeps_the_quote_reserve_and_the_bze_for_fees(self):
         # 50 BZE spendable after the 10 BZE reserve and the arb's own fees: at most 51.020408 TOKEN at 0.98.
         self.connector.balances["BZE"] = Decimal("60") + FIXED_BZE
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
@@ -398,7 +398,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         expected = (Decimal("50") / Decimal("0.98") / BASE_STEP).to_integral_value(rounding=ROUND_FLOOR) * BASE_STEP
         self.assertEqual([(Decimal("0.98"), expected)], levels)
 
-    def test_a_cut_level_below_the_chain_minimum_is_dropped(self):
+    async def test_a_cut_level_below_the_chain_minimum_is_dropped(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000")), (Decimal("0.99"), Decimal("100000"))]
         self.connector.chain_minimum = Decimal("5000")
         strategy = self._strategy()
@@ -408,7 +408,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
 
     # === One arb at a time, cooldown ===
 
-    def test_waits_for_the_arb_to_settle_then_for_the_cooldown(self):
+    async def test_waits_for_the_arb_to_settle_then_for_the_cooldown(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         strategy = self._strategy(cooldown_blocks=2)
         self._run(2)
@@ -424,7 +424,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self._new_block()
         self.assertEqual(2, len(self.connector.sent))
 
-    def test_cooldown_ends_on_time_without_block_notifications(self):
+    async def test_cooldown_ends_on_time_without_block_notifications(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         self._strategy(cooldown_blocks=2, check_interval_seconds=5)
         self._run(2)
@@ -434,7 +434,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self._run(10)
         self.assertEqual(2, len(self.connector.sent))
 
-    def test_a_failed_arb_tx_trades_nothing_and_leaves_no_imbalance(self):
+    async def test_a_failed_arb_tx_trades_nothing_and_leaves_no_imbalance(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         strategy = self._strategy()
         self._run(2)
@@ -445,7 +445,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self.assertEqual([], strategy._imbalances)
         self.assertEqual(0, strategy._trades_today)
 
-    def test_status_shows_prices_profit_and_the_skip_reason(self):
+    async def test_status_shows_prices_profit_and_the_skip_reason(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         self.connector.bids = [(Decimal("0.97"), Decimal("10"))]
         strategy = self._strategy()
@@ -465,7 +465,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
 
     # === Partial fills ===
 
-    def test_a_partly_refunded_fill_is_rebalanced_once_on_the_pool(self):
+    async def test_a_partly_refunded_fill_is_rebalanced_once_on_the_pool(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         strategy = self._strategy(cooldown_blocks=0, max_rebalance_cost_pct=Decimal("1"))
         self._run(2)
@@ -487,7 +487,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self._new_block()
         self.assertEqual(1, len(self.connector.swaps))
 
-    def test_a_refunded_sell_fill_is_rebalanced_by_selling_on_the_pool(self):
+    async def test_a_refunded_sell_fill_is_rebalanced_by_selling_on_the_pool(self):
         self.connector.bids = [(Decimal("1.02"), Decimal("1000"))]
         strategy = self._strategy(cooldown_blocks=0)
         self._run(2)
@@ -497,7 +497,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self._new_block()
         self.assertEqual([("sell", Decimal("750"), Decimal("0.5"))], self.connector.swaps)
 
-    def test_an_imbalance_too_costly_to_rebalance_is_kept_and_never_retried(self):
+    async def test_an_imbalance_too_costly_to_rebalance_is_kept_and_never_retried(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         strategy = self._strategy(cooldown_blocks=0, max_rebalance_cost_pct=Decimal("0.01"))
         self._run(2)
@@ -509,7 +509,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self.assertEqual(Decimal("-400"), strategy.open_imbalance)
         self.assertIn("kept (rebalancing costs", self._status(strategy))
 
-    def test_an_imbalance_is_kept_when_rebalancing_is_off(self):
+    async def test_an_imbalance_is_kept_when_rebalancing_is_off(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         strategy = self._strategy(cooldown_blocks=0, rebalance_on_partial=False)
         self._run(2)
@@ -520,7 +520,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self.assertEqual([], self.connector.swaps)
         self.assertIn("kept (rebalance_on_partial is off)", self._status(strategy))
 
-    def test_a_failed_rebalance_is_not_retried(self):
+    async def test_a_failed_rebalance_is_not_retried(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         strategy = self._strategy(cooldown_blocks=0)
         self._run(2)
@@ -534,7 +534,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self.assertEqual(Decimal("-400"), strategy.open_imbalance)
         self.assertIn("kept (rebalance failed", self._status(strategy))
 
-    def test_a_rebalance_refused_up_front_is_not_retried(self):
+    async def test_a_rebalance_refused_up_front_is_not_retried(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         strategy = self._strategy(cooldown_blocks=0)
         self._run(2)
@@ -548,7 +548,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
 
     # === Halts ===
 
-    def test_a_halted_pool_stops_trading_until_it_is_lifted(self):
+    async def test_a_halted_pool_stops_trading_until_it_is_lifted(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         self.connector.pool.halted = True
         strategy = self._strategy()
@@ -562,7 +562,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self._new_block()
         self.assertEqual(1, len(self.connector.sent))
 
-    def test_a_halted_refusal_stops_trading(self):
+    async def test_a_halted_refusal_stops_trading(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         self.connector.fill_error = BeezeeFillError("Beezee market TOKEN/BZE is halted (denom utoken)")
         strategy = self._strategy()
@@ -570,7 +570,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self.assertEqual("market or pool halted", strategy._last_skip_reason)
         self.assertTrue(strategy._halted)
 
-    def test_other_refusals_are_reported_as_the_skip_reason(self):
+    async def test_other_refusals_are_reported_as_the_skip_reason(self):
         self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
         self.connector.fill_error = BeezeeSwapError("not enough BZE for the swap")
         strategy = self._strategy()
@@ -578,7 +578,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
         self.assertEqual("arb refused up front: not enough BZE for the swap", strategy._last_skip_reason)
         self.assertFalse(strategy._halted)
 
-    def test_no_pool_or_an_empty_pool_skips(self):
+    async def test_no_pool_or_an_empty_pool_skips(self):
         self.connector.pool = None
         strategy = self._strategy()
         self._run(2)
@@ -586,7 +586,7 @@ class BeezeePoolBookArbTests(unittest.TestCase):
 
     # === Example ===
 
-    def test_example_config_loads(self):
+    async def test_example_config_loads(self):
         config = BeezeePoolBookArbConfig(**yaml.safe_load(EXAMPLE.read_text()))
         self.assertEqual("beezee", config.exchange)
         self.assertEqual("BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A", config.trading_pair)
