@@ -425,6 +425,29 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
 
     @aioresponses()
+    async def test_gas_fees_paid_counts_only_txs_accepted_at_broadcast(self, mock_api):
+        self._mock_account(mock_api, sequence=3)
+        self._mock_account(mock_api, sequence=3)
+        # gas limit = ceil(100000 * 1.3) = 130000; fee = 1300 ubze, then ceil(200000 * 1.3) * 0.01 = 2600 ubze.
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "100000"}})
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "100000"}})
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "200000"}})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {
+            "code": 5, "codespace": "sdk", "raw_log": "spendable balance 0ubze is smaller than 1300ubze: insufficient funds", "txhash": "",
+        }})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "AA" * 32}})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "BB" * 32}})
+        self.assertEqual(Decimal("0"), self.data_source.gas_fees_paid)
+
+        with self.assertRaises(BeezeeTxRefusedError):
+            await self.data_source.simulate_sign_and_broadcast(self.messages)
+        self.assertEqual(Decimal("0"), self.data_source.gas_fees_paid)
+        await self.data_source.simulate_sign_and_broadcast(self.messages)
+        self.assertEqual(Decimal("0.0013"), self.data_source.gas_fees_paid)
+        await self.data_source.simulate_sign_and_broadcast(self.messages)
+        self.assertEqual(Decimal("0.0039"), self.data_source.gas_fees_paid)
+
+    @aioresponses()
     async def test_refused_broadcast_resets_the_sequence(self, mock_api):
         # CheckTx refused the tx (not a sequence mismatch), so sequence 3 was never used on chain.
         self._mock_account(mock_api, sequence=3)

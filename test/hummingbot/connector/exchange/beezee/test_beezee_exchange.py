@@ -137,6 +137,21 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Decimal("0.0000000001"), rule.min_price_increment)
         self.assertEqual(Decimal("0.000002"), rule.min_notional_size)
 
+    async def test_minimum_order_amount_is_the_chain_minimum_once_the_market_is_loaded(self):
+        data_source = Mock()
+        data_source.get_trade_fees = AsyncMock(return_value={"maker": None, "taker": None})
+        data_source.get_all_markets = AsyncMock(return_value={self.market.market_id: self.market})
+        data_source.gas_fees_paid = Decimal("0.0042")
+        self.exchange._data_source = data_source
+        self.assertEqual(Decimal("0"), self.exchange.minimum_order_amount("BZE-USDC", Decimal("0.0003")))
+
+        await self.exchange._format_trading_rules({})
+
+        # ceil(1 / 0.0003) x 2 = 6668 ubze.
+        self.assertEqual(Decimal("0.006668"), self.exchange.minimum_order_amount("BZE-USDC", Decimal("0.0003")))
+        self.assertEqual(Decimal("0.000008"), self.exchange.minimum_order_amount("BZE-USDC", Decimal("0.25")))
+        self.assertEqual(Decimal("0.0042"), self.exchange.gas_fees_paid())
+
     async def test_update_balances_combines_bank_and_dust(self):
         data_source = Mock()
         data_source._metadata_by_denom = {}

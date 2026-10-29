@@ -3,7 +3,7 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote
 
 from aiohttp import ContentTypeError
@@ -115,10 +115,19 @@ class BeezeeAPIDataSource:
         self._cached_account_number: Optional[int] = None
         self._next_account_sequence: Optional[int] = None
         self._queue_message_scan_gas = CONSTANTS.DEFAULT_QUEUE_MESSAGE_SCAN_GAS
+        # Gas fees of the txs accepted at broadcast, in base units of the native denom.
+        self._gas_fees_paid = 0
 
     @classmethod
     def logger(cls):
         return logging.getLogger(__name__)
+
+    @property
+    def gas_fees_paid(self) -> Decimal:
+        """Gas fees of every tx this data source broadcast and the node accepted, in display units of the native
+        token. A tx accepted at broadcast pays its fee even when its messages fail in the block."""
+        metadata = self._metadata_by_denom.get(self._native_denom) or self._fallback_metadata_for_denom(self._native_denom)
+        return chain_amount_to_display(self._gas_fees_paid, token_from_metadata(self._native_denom, metadata))
 
     @property
     def account_address(self) -> Optional[str]:
@@ -416,7 +425,7 @@ class BeezeeAPIDataSource:
             for attempt in range(2):
                 account = await self.reserve_account_info_sequence()
                 try:
-                    tx_bytes = await self._simulate_and_sign(messages, account, memo, extra_gas)
+                    tx_bytes, fee_amount = await self._simulate_and_sign(messages, account, memo, extra_gas)
                 except BeezeeTxRefusedError as error:
                     await self.reset_account_sequence()
                     if error.is_sequence_mismatch and attempt == 0:
@@ -430,6 +439,7 @@ class BeezeeAPIDataSource:
                 tx_response = response.get("tx_response", {})
                 code = int(tx_response.get("code", 0))
                 if code == 0:
+                    self._gas_fees_paid += int(fee_amount)
                     return response
                 # Refused at CheckTx: the reserved sequence was not used on chain.
                 await self.reset_account_sequence()
@@ -444,9 +454,12 @@ class BeezeeAPIDataSource:
                 raise error
             raise RuntimeError("Beezee tx retry loop exited without a result.")
 
-    async def _simulate_and_sign(self, messages: List[bytes], account: BeezeeAccountInfo, memo: str, extra_gas: int) -> bytes:
+    async def _simulate_and_sign(
+        self, messages: List[bytes], account: BeezeeAccountInfo, memo: str, extra_gas: int
+    ) -> Tuple[bytes, str]:
         gas_used = await self.simulate_gas(messages, account.sequence, memo=memo)
         gas_limit = gas_limit_from_simulation(gas_used, self._gas_adjustment) + extra_gas
+        fee_amount = fee_amount_from_gas(gas_limit, self._gas_price)
         return build_signed_transaction(
             signer=self._signer,
             chain_id=self._chain_id,
@@ -454,10 +467,10 @@ class BeezeeAPIDataSource:
             sequence=account.sequence,
             messages=messages,
             fee_denom=self._native_denom,
-            fee_amount=fee_amount_from_gas(gas_limit, self._gas_price),
+            fee_amount=fee_amount,
             gas_limit=gas_limit,
             memo=memo,
-        )
+        ), fee_amount
 
     def create_order_message(self, market: BeezeeMarket, order_type: str, amount: Decimal, price: Decimal) -> bytes:
         if self._signer is None:
