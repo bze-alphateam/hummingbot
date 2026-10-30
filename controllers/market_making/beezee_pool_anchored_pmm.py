@@ -7,6 +7,7 @@ from pydantic import Field
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.exchange.beezee.beezee_amm import BeezeeSwapError
 from hummingbot.connector.exchange.beezee.beezee_pool_price_delegate import BeezeePoolPriceDelegate
+from hummingbot.connector.exchange.beezee.beezee_utils import VENUE_BOOK, describe_venues, venue_refusal
 from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
 from hummingbot.strategy_v2.controllers.market_making_controller_base import (
     MarketMakingControllerBase,
@@ -83,6 +84,8 @@ class BeezeePoolAnchoredPMM(MarketMakingControllerBase):
     thin book makes easy to push. Spreads, levels, amounts and refresh are pmm_simple's; every quote also keeps at
     least the pool fee + `min_spread_over_pool_fee_pct` from the pool price, and the quotes are replaced as soon as the
     pool moves more than `requote_threshold_pct`. Without a pool the book mid is the reference (a warning in status).
+    A pool and an order-book market are separate venues on chain: a pair with no market is refused (nothing to quote
+    on), a pair with a market and no pool falls back to the book mid.
 
     With `hedge_fills_on_pool`, each of our fills is swapped back on the pool in the opposite direction when its edge
     over the pool price pays for the pool fee, the taker fee, the gas and `min_hedge_profit_pct`. The fills of one
@@ -99,6 +102,7 @@ class BeezeePoolAnchoredPMM(MarketMakingControllerBase):
         self._reference_by_executor: Dict[str, Decimal] = {}
         self._warned_source: Optional[str] = None
         self._halted: Optional[str] = None
+        self._refused: Optional[str] = None
         self._halt_stopped: Set[str] = set()
         # Hedge mode: what each executor had filled when last seen (base, quote), fills waiting for their block to end,
         # the swap in flight, and counters for status.
@@ -125,6 +129,10 @@ class BeezeePoolAnchoredPMM(MarketMakingControllerBase):
 
     async def update_processed_data(self):
         pair = self.config.trading_pair
+        if not self._check_venue():
+            self.processed_data = {"reference_price": None, "spread_multiplier": Decimal("1"), "price_source": None,
+                                   "pool_fee": Decimal("0"), "min_spread": Decimal("0")}
+            return
         pool = self.connector.get_pool(pair)
         if pool is not None and pool.halted:
             self._set_halted(f"the pool {pool.pool_id} or the market of {pair} is halted")
@@ -148,6 +156,20 @@ class BeezeePoolAnchoredPMM(MarketMakingControllerBase):
         }
         if self.config.hedge_fills_on_pool:
             self.process_hedges(pool_price if source == POOL else None)
+
+    def _check_venue(self) -> bool:
+        """The pair needs an order-book market to quote on; refused once, with the reason, when it has none. Waits
+        while the connector has not loaded the pairs' venues yet."""
+        if self._refused is not None:
+            return False
+        venues = tuple(self.connector.trading_pair_venues(self.config.trading_pair))
+        if not venues:
+            return False
+        self._refused = venue_refusal(self.connector, self.config.trading_pair, (VENUE_BOOK,), "pool-anchored PMM")
+        if self._refused is not None:
+            self.logger().error(f"Pool-anchored PMM refuses to start: {self._refused}.")
+            return False
+        return True
 
     def _book_mid(self) -> Optional[Decimal]:
         try:
@@ -435,10 +457,14 @@ class BeezeePoolAnchoredPMM(MarketMakingControllerBase):
     # === Status ===
 
     def to_format_status(self) -> List[str]:
+        if self._refused is not None:
+            return [f"Pool-anchored PMM {self.config.trading_pair}", f"  Refused: {self._refused}"]
         data = self.processed_data
         reference = data.get("reference_price")
+        venues = describe_venues(self.connector.trading_pair_venues(self.config.trading_pair))
         lines = [
-            f"Pool-anchored PMM {self.config.trading_pair}{' (HALTED: ' + self._halted + ')' if self._halted else ''}",
+            f"Pool-anchored PMM {self.config.trading_pair}{' (HALTED: ' + self._halted + ')' if self._halted else ''}"
+            f"   venues: {venues}",
             f"  Reference: {data.get('price_source', '-')} {f'{reference:.10g}' if reference is not None else '-'}   "
             f"pool fee {Decimal(data.get('pool_fee') or 0) * 100:.3f}%   "
             f"spread floor {Decimal(data.get('min_spread') or 0) * 100:.3f}%",
@@ -462,6 +488,7 @@ class BeezeePoolAnchoredPMM(MarketMakingControllerBase):
             "price_source": self.processed_data.get("price_source"),
             "reference_price": str(reference) if reference is not None else None,
             "halted": self._halted is not None,
+            "refused": self._refused,
             "hedges_sent": self._hedges_sent,
             "hedges_failed": self._hedges_failed,
             "unhedged_base": str(self._unhedged_base),

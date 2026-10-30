@@ -12,6 +12,7 @@ from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.exchange.beezee.beezee_amm import BeezeeSwapError
 from hummingbot.connector.exchange.beezee.beezee_fills import BeezeeFillError
 from hummingbot.connector.exchange.beezee.beezee_pool_price_delegate import BeezeePoolPriceDelegate
+from hummingbot.connector.exchange.beezee.beezee_utils import VENUE_BOOK, VENUE_POOL, describe_venues, venue_refusal
 from hummingbot.core.data_type.common import MarketDict, OrderType, PriceType, TradeType
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
@@ -39,13 +40,15 @@ class BeezeePriceBandsConfig(StrategyV2ConfigBase):
     controllers_config: List[str] = []
     exchange: str = Field("beezee")
     trading_pair: str = Field("TOKEN-BZE")
-    # Reference price: the pair's pool, or the order-book mid. Empty = the pool when the pair has one.
+    # Reference price: the pair's pool, or the order-book mid. Empty = the pool when the pair has one, else the book mid.
+    # A pool and an order-book market are separate venues: a pair may have either or both.
     price_source: Optional[Literal["pool", "book_mid"]] = Field(None)
     # The band, in quote per base (the pair's own order-price units). Below the floor the script buys base, above the
     # ceiling it sells base, inside it does nothing.
     floor_price: Decimal = Field(gt=0)
     ceiling_price: Decimal = Field(gt=0)
-    # Where a trade goes: the pool only, or the cheaper of the pool and the book (never split across both).
+    # Where a trade goes: the pool only, or the cheaper of the pool and the book (never split across both). "best" uses
+    # whatever venue the pair has and compares only when it has both.
     venue: Literal["pool", "best"] = Field("pool")
     # Largest buy, in quote spent, and largest sell, in base sold.
     max_trade_quote: Decimal = Field(Decimal("100"), gt=0)
@@ -211,15 +214,19 @@ class BeezeePriceBands(StrategyV2Base):
         self._last_skip_reason = skip_reason
 
     def _check_start(self) -> bool:
-        """Refuses a band whose floor is not below its ceiling, a reserve above the balance, and a pair without the
-        native token (BZE) on one side, since the fees and the gas are paid in it."""
+        """Refuses a band whose floor is not below its ceiling, a pair without the venue the config needs (a pool for
+        `venue: pool` or `price_source: pool`, a market for `price_source: book_mid`), a reserve above the balance, and
+        a pair without the native token (BZE) on one side, since the fees and the gas are paid in it."""
         if self._started:
             return True
         taker = self._taker_fee_token()
         native = taker[0] if taker is not None else "BZE"
         config = self.config
+        missing_venue = self._venue_refusal()
         if config.floor_price >= config.ceiling_price:
             reason = f"floor_price {config.floor_price} is not below ceiling_price {config.ceiling_price}"
+        elif missing_venue is not None:
+            reason = missing_venue
         elif native not in (self.base, self.quote):
             reason = (
                 f"{self.pair} has no {native} side: the fees and the gas are paid in {native} and cannot be counted "
@@ -240,6 +247,27 @@ class BeezeePriceBands(StrategyV2Base):
         self._native = native
         self._started = True
         return True
+
+    def _venue_refusal(self) -> Optional[str]:
+        config = self.config
+        checks = []
+        if config.venue == POOL:
+            checks.append(((VENUE_POOL,), "price bands with venue: pool"))
+        if config.price_source == POOL:
+            checks.append(((VENUE_POOL,), "price bands with price_source: pool"))
+        elif config.price_source == BOOK_MID:
+            checks.append(((VENUE_BOOK,), "price bands with price_source: book_mid"))
+        for needed, user in checks:
+            refusal = venue_refusal(self.connector, self.pair, needed, user)
+            if refusal is not None:
+                return refusal
+        if not self.venues:
+            return f"{self.pair} has neither a liquidity pool nor an order-book market"
+        return None
+
+    @property
+    def venues(self) -> Tuple[str, ...]:
+        return tuple(self.connector.trading_pair_venues(self.pair))
 
     def _roll_day(self):
         day = utc_day(self.current_timestamp)
@@ -282,8 +310,9 @@ class BeezeePriceBands(StrategyV2Base):
         return self._send(plan)
 
     def reference_price(self) -> Optional[Tuple[Decimal, str]]:
-        """(price, source): the pool price through the pool price delegate, or the order-book mid."""
-        source = self.config.price_source or (POOL if self.connector.get_pool(self.pair) is not None else BOOK_MID)
+        """(price, source): the pool price through the pool price delegate, or the order-book mid. By default the pool
+        when the pair has one, else the book mid."""
+        source = self.config.price_source or (POOL if VENUE_POOL in self.venues else BOOK_MID)
         if source == POOL:
             price = self.delegate.get_price_by_type(PriceType.MidPrice)
             return None if price.is_nan() else (price, POOL)
@@ -338,7 +367,7 @@ class BeezeePriceBands(StrategyV2Base):
             return f"no {token} above the reserve"
         plans: List[TradePlan] = []
         reasons: List[str] = []
-        venues = [POOL] if config.venue == POOL else [POOL, BOOK]
+        venues = [POOL] if config.venue == POOL else [venue for venue in (POOL, BOOK) if venue in self.venues]
         for venue in venues:
             plan = self._plan_pool(side, cap, limit) if venue == POOL else self._plan_book(side, cap, limit)
             if isinstance(plan, TradePlan):
@@ -627,7 +656,8 @@ class BeezeePriceBands(StrategyV2Base):
             where = f"{price:.10g} ({source}), {position}"
         period = "today (UTC)" if config.budget_period == DAILY else "this run"
         lines = [
-            f"  Pair: {self.pair}{f' (HALTED: {self._halted})' if self._halted else ''}   venue: {config.venue}",
+            f"  Pair: {self.pair}{f' (HALTED: {self._halted})' if self._halted else ''}   venue: {config.venue}   "
+            f"venues: {describe_venues(self.venues)}",
             f"  Reference price: {where}",
             f"  Band: floor {fmt(config.floor_price)} / ceiling {fmt(config.ceiling_price)} {self.quote}",
             f"  Buy budget {period}: used {fmt(self._bought_quote)} / {fmt(config.buy_budget_quote)} {self.quote}, "

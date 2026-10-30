@@ -25,6 +25,8 @@ from hummingbot.connector.exchange.beezee.beezee_tx import (
 )
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeMarket,
+    BeezeePair,
+    BeezeeVenueError,
     chain_amount_to_display,
     chain_price_to_display,
     display_amount_to_chain,
@@ -107,6 +109,8 @@ class BeezeeAPIDataSource:
         self._signer = signer
         self._metadata_by_denom: Dict[str, Dict[str, Any]] = {}
         self._markets_by_id: Dict[str, BeezeeMarket] = {}
+        self._pairs_by_trading_pair: Dict[str, BeezeePair] = {}
+        self._pairs_loaded = False
         self._symbol_map: Optional[bidict] = None
         self._known_limit_ids = {rate_limit.limit_id for rate_limit in CONSTANTS.RATE_LIMITS}
         self._warned_missing_metadata_denoms: Set[str] = set()
@@ -288,32 +292,74 @@ class BeezeeAPIDataSource:
             }
         return {}
 
-    async def get_all_markets(self, refresh: bool = False) -> Dict[str, BeezeeMarket]:
-        if self._markets_by_id and not refresh:
-            return self._markets_by_id
+    async def get_all_pairs(self, refresh: bool = False) -> Dict[str, BeezeePair]:
+        """Every trading pair, by name, with its venues: the order-book markets and the liquidity pools, read apart.
+
+        A market and a pool are unrelated on chain, so a pair is listed for each market and for each pool whose two
+        denoms have no market. A market's pair keeps the market's orientation and gets the pool of the same two denoms
+        when there is one; a pool-only pair takes the pool's orientation (denoms sorted). Names come from the denoms'
+        metadata either way, markets first, so a market's pair name never changes because of a pool.
+        """
+        if self._pairs_loaded and not refresh:
+            return self._pairs_by_trading_pair
         raw_markets = await self._paged_request(CONSTANTS.TRADING_PAIRS_PATH_URL, "market")
-        denoms: Set[str] = set()
-        for market in raw_markets:
-            denoms.update({market["base"], market["quote"]})
-        for denom in denoms:
+        raw_pools = await self.get_all_liquidity_pools()
+        market_denoms = [(market["base"], market["quote"]) for market in raw_markets]
+        pool_ids = {frozenset((pool["base"], pool["quote"])): pool["id"] for pool in raw_pools}
+        listed = {frozenset(denoms) for denoms in market_denoms}
+        pool_only: List[Tuple[str, str]] = []
+        for pool in raw_pools:
+            denoms = frozenset((pool["base"], pool["quote"]))
+            if denoms not in listed:
+                listed.add(denoms)
+                pool_only.append((pool["base"], pool["quote"]))
+        for denom in {denom for denoms in market_denoms + pool_only for denom in denoms}:
             if denom not in self._metadata_by_denom:
                 self._metadata_by_denom[denom] = await self.get_denom_metadata(denom)
-        self._symbol_map = unique_market_symbols([(market["base"], market["quote"]) for market in raw_markets], self._metadata_by_denom)
+        self._symbol_map = unique_market_symbols(market_denoms + pool_only, self._metadata_by_denom)
         self._markets_by_id = {
             f"{market['base']}/{market['quote']}": market_from_data(market, self._metadata_by_denom, self._symbol_map)
             for market in raw_markets
         }
+        pairs: Dict[str, BeezeePair] = {}
+        for market in self._markets_by_id.values():
+            pool_id = pool_ids.get(frozenset((market.base.denom, market.quote.denom)))
+            pairs[market.trading_pair] = BeezeePair(base=market.base, quote=market.quote, market=market, pool_id=pool_id)
+        for base, quote_denom in pool_only:
+            # The tokens of a market that does not exist: only its base, quote and pair name are used.
+            tokens = market_from_data({"base": base, "quote": quote_denom}, self._metadata_by_denom, self._symbol_map)
+            pairs[tokens.trading_pair] = BeezeePair(
+                base=tokens.base, quote=tokens.quote, pool_id=pool_ids[frozenset((base, quote_denom))]
+            )
+        self._pairs_by_trading_pair = pairs
+        self._pairs_loaded = True
+        return self._pairs_by_trading_pair
+
+    async def get_all_markets(self, refresh: bool = False) -> Dict[str, BeezeeMarket]:
+        """The order-book markets by market id (base/quote denoms). Pool-only pairs are not in it."""
+        await self.get_all_pairs(refresh=refresh)
         return self._markets_by_id
 
     async def get_symbol_map(self) -> bidict:
+        """Exchange symbol (base/quote denoms, in the pair's orientation) to pair name, for every pair."""
         if self._symbol_map is None:
-            await self.get_all_markets()
+            await self.get_all_pairs()
         return self._symbol_map or bidict()
 
+    async def get_pair(self, trading_pair: str) -> BeezeePair:
+        """The pair and its venues. KeyError for an unknown pair."""
+        return (await self.get_all_pairs())[trading_pair]
+
     async def get_market_by_trading_pair(self, trading_pair: str) -> BeezeeMarket:
-        symbol_map = await self.get_symbol_map()
-        market_id = symbol_map.inverse[trading_pair]
-        return (await self.get_all_markets())[market_id]
+        """The pair's order-book market. KeyError for an unknown pair, BeezeeVenueError (a KeyError) for a pair with
+        only a liquidity pool."""
+        pair = await self.get_pair(trading_pair)
+        if pair.market is None:
+            raise BeezeeVenueError(
+                f"Beezee pair {trading_pair} has no order-book market, only a liquidity pool. Order-book calls are "
+                f"refused on it; use the pool calls (quote_swap, amm_swap)."
+            )
+        return pair.market
 
     async def get_order_book(self, market_id: str) -> Dict[str, List[Dict[str, Any]]]:
         bids = await self._paged_request(CONSTANTS.MARKET_AGGREGATED_ORDERS_PATH_URL, "list", params={"market": market_id, "order_type": CONSTANTS.SIDE_BUY}, page_limit=CONSTANTS.DEFAULT_ORDER_BOOK_DEPTH)

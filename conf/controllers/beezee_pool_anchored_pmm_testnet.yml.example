@@ -16,8 +16,9 @@ controller_type: market_making
 connector_name: beezee
 
 # TUSDC quoted in BZE: market factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd / ubze, pool
-# factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd_ubze (pool fee 0.2%). The market has to be created once
-# before the first run (README_BZE.md, "AMM run guide", testnet pair).
+# factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd_ubze (pool fee 0.2%). The controller quotes on the book,
+# so it needs the market, which testnet does not have: create it once before the first run, else the controller
+# refuses to start (README_BZE.md, "AMM run guide", testnet pair).
 trading_pair: "TUSDC-BZE"
 
 # Budget for all levels together, in BZE: 100 BZE of bids and TUSDC worth 100 BZE of asks (about 77 TUSDC), plus

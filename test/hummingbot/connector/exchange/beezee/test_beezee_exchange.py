@@ -15,6 +15,7 @@ from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeConfigMap,
     BeezeeMainnetNetworkMode,
     BeezeeMnemonicWalletAccountMode,
+    BeezeePair,
     BeezeeReadOnlyAccountMode,
     market_from_data,
 )
@@ -125,7 +126,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
     async def test_format_trading_rules_derives_chain_based_rules(self):
         data_source = Mock()
         data_source.get_trade_fees = AsyncMock(return_value={"maker": TokenAmount("BZE", Decimal("0.001")), "taker": None})
-        data_source.get_all_markets = AsyncMock(return_value={self.market.market_id: self.market})
+        data_source.get_all_pairs = AsyncMock(return_value={"BZE-USDC": BeezeePair(self.market.base, self.market.quote, market=self.market)})
         self.exchange._data_source = data_source
 
         rules = await self.exchange._format_trading_rules({})
@@ -140,7 +141,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
     async def test_minimum_order_amount_is_the_chain_minimum_once_the_market_is_loaded(self):
         data_source = Mock()
         data_source.get_trade_fees = AsyncMock(return_value={"maker": None, "taker": None})
-        data_source.get_all_markets = AsyncMock(return_value={self.market.market_id: self.market})
+        data_source.get_all_pairs = AsyncMock(return_value={"BZE-USDC": BeezeePair(self.market.base, self.market.quote, market=self.market)})
         data_source.gas_fees_paid = Decimal("0.0042")
         self.exchange._data_source = data_source
         self.assertEqual(Decimal("0"), self.exchange.minimum_order_amount("BZE-USDC", Decimal("0.0003")))

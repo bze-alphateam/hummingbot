@@ -5,7 +5,7 @@ import time
 from collections import OrderedDict, defaultdict
 from dataclasses import asdict, dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from hummingbot.connector.constants import s_decimal_NaN
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS, beezee_web_utils as web_utils
@@ -45,8 +45,12 @@ from hummingbot.connector.exchange.beezee.beezee_order_batcher import (
 )
 from hummingbot.connector.exchange.beezee.beezee_signer import BeezeeSigner
 from hummingbot.connector.exchange.beezee.beezee_utils import (
+    VENUE_BOOK,
+    VENUE_POOL,
     BeezeeConfigMap,
     BeezeeMarket,
+    BeezeePair,
+    BeezeeVenueError,
     chain_amount_to_display,
     chain_price_to_display,
     display_price_to_chain,
@@ -138,7 +142,7 @@ class PreparedSwap:
     """A swap checked up front, with its message, waiting to be tracked and sent."""
 
     request: BeezeeSwapRequest
-    market: BeezeeMarket
+    market: BeezeePair
     quote: BeezeeSwapQuote
     min_output_amount: int
     message: bytes
@@ -204,7 +208,9 @@ class BeezeeExchange(ExchangePyBase):
         self._pool_tracker: Optional[BeezeePoolTracker] = None
         self._pool_refresh_task: Optional[asyncio.Task] = None
         self._trade_fees: Dict[str, Optional[TokenAmount]] = {}
+        # The order-book markets by pair name, and every pair (market, pool or both) with its venues.
         self._markets_by_trading_pair: Dict[str, BeezeeMarket] = {}
+        self._pairs_by_trading_pair: Dict[str, BeezeePair] = {}
         self._halted_denoms: Set[str] = set()
         self._halted_denoms_loaded = False
         self._last_halted_denoms_refresh = 0.0
@@ -341,6 +347,37 @@ class BeezeeExchange(ExchangePyBase):
     def supported_order_types(self):
         return [OrderType.LIMIT]
 
+    # === Venues ===
+    #
+    # On chain an order-book market and a liquidity pool are unrelated: a pair can have either or both. Order-book
+    # calls (orders, cancels, fills, the book) need the market; pool calls (pool reads, quotes, swaps) need the pool.
+
+    def trading_pair_venues(self, trading_pair: str) -> Tuple[str, ...]:
+        """The pair's venues, "book" and/or "pool", in that order. Empty while the pairs are not loaded (the trading
+        rules load them) or for an unknown pair. A pool created after the pairs were loaded counts once the pool
+        tracker has read it."""
+        pair = self._pairs_by_trading_pair.get(trading_pair)
+        has_book = pair is not None and pair.has_book
+        has_pool = (pair is not None and pair.has_pool) or self._build_pool_tracker().get_pool(trading_pair) is not None
+        return tuple(venue for venue, present in ((VENUE_BOOK, has_book), (VENUE_POOL, has_pool)) if present)
+
+    def _check_book_venue(self, trading_pair: str, action: str):
+        """Raises BeezeeVenueError for a known pair with no order-book market, before anything is tracked or sent."""
+        pair = self._pairs_by_trading_pair.get(trading_pair)
+        if pair is not None and not pair.has_book:
+            raise BeezeeVenueError(
+                f"Beezee pair {trading_pair} has no order-book market, only a liquidity pool: {action} refused. Use the "
+                f"pool calls (quote_swap, amm_swap) on it."
+            )
+
+    def buy(self, trading_pair: str, amount: Decimal, order_type=OrderType.LIMIT, price: Decimal = s_decimal_NaN, **kwargs) -> str:
+        self._check_book_venue(trading_pair, "a buy order")
+        return super().buy(trading_pair, amount, order_type, price, **kwargs)
+
+    def sell(self, trading_pair: str, amount: Decimal, order_type=OrderType.LIMIT, price: Decimal = s_decimal_NaN, **kwargs) -> str:
+        self._check_book_venue(trading_pair, "a sell order")
+        return super().sell(trading_pair, amount, order_type, price, **kwargs)
+
     def _is_user_stream_initialized(self) -> bool:
         # Beezee v1 does not have a reliable private stream, so order and balance
         # state are maintained through polling. Do not block connector readiness
@@ -468,7 +505,7 @@ class BeezeeExchange(ExchangePyBase):
         for index, request in enumerate(requests):
             if request.side not in (CONSTANTS.SIDE_BUY, CONSTANTS.SIDE_SELL):
                 raise BeezeeSwapError(f"side must be '{CONSTANTS.SIDE_BUY}' or '{CONSTANTS.SIDE_SELL}', got {request.side!r}")
-            market = tracker.market(request.trading_pair)
+            market = tracker.pair(request.trading_pair)
             pool = tracker.get_pool(request.trading_pair)
             if market is None or pool is None:
                 raise BeezeeSwapError(f"no liquidity pool for {request.trading_pair}")
@@ -551,7 +588,7 @@ class BeezeeExchange(ExchangePyBase):
             except Exception as error:
                 if isinstance(error, BeezeeTxRefusedError):
                     if error.is_denom_halted:
-                        markets = {swap.market.market_id: swap.market for swap in swaps}
+                        markets = {self._halt_key(swap.market): swap.market for swap in swaps}
                         if fill is not None:
                             markets[fill.market.market_id] = fill.market
                         for market in markets.values():
@@ -618,7 +655,7 @@ class BeezeeExchange(ExchangePyBase):
             if is_denom_halted_error(code, tx_response.get("codespace"), raw_log):
                 data_source = self._build_data_source()
                 for trading_pair in {swap.trading_pair for swap in swaps}:
-                    await self._mark_market_halted_by_chain(await data_source.get_market_by_trading_pair(trading_pair))
+                    await self._mark_market_halted_by_chain(await data_source.get_pair(trading_pair))
             for swap in swaps:
                 self._fail_swap(swap.client_order_id, f"Beezee swap tx {tx_hash} failed with code {code}: {raw_log}")
             return
@@ -653,7 +690,7 @@ class BeezeeExchange(ExchangePyBase):
     async def _process_swap_fill(self, swap: PendingSwap, tx_hash: str, input_amount: int, output_amount: int):
         order = self._order_tracker.fetch_tracked_order(swap.client_order_id)
         self._pending_swaps.pop(swap.client_order_id, None)
-        market = await self._build_data_source().get_market_by_trading_pair(swap.trading_pair)
+        market = await self._build_data_source().get_pair(swap.trading_pair)
         is_buy = swap.side == CONSTANTS.SIDE_BUY
         input_token, output_token = (market.quote, market.base) if is_buy else (market.base, market.quote)
         pool_fee_amount = swap_fee_amount(Decimal(swap.pool_fee), input_amount)
@@ -842,6 +879,11 @@ class BeezeeExchange(ExchangePyBase):
     def _fill_market(self, trading_pair: str) -> BeezeeMarket:
         market = self._markets_by_trading_pair.get(trading_pair)
         if market is None:
+            if trading_pair in self._pairs_by_trading_pair:
+                raise BeezeeFillError(
+                    f"Beezee pair {trading_pair} has no order-book market, only a liquidity pool: there is no book to "
+                    f"take orders from"
+                )
             raise BeezeeFillError(f"unknown Beezee trading pair {trading_pair}")
         return market
 
@@ -1059,6 +1101,8 @@ class BeezeeExchange(ExchangePyBase):
     # create message of a tx is resolved by the tx's i-th OrderCreateMessageEvent, a cancel by its order id.
 
     def batch_order_create(self, orders_to_create: List[LimitOrder]) -> List[LimitOrder]:
+        for order in orders_to_create:
+            self._check_book_venue(order.trading_pair, "an order")
         created = super().batch_order_create(orders_to_create)
         # The create tasks have not run yet: their tx goes out once they have all been submitted.
         self._order_batcher.expect(order.client_order_id for order in created)
@@ -1270,24 +1314,28 @@ class BeezeeExchange(ExchangePyBase):
             item.reject(rejection)
 
     async def _format_trading_rules(self, exchange_info_dict: Dict[str, Any]) -> List[TradingRule]:
+        """One rule per pair. A market's pair gets the order-book rules. A pool-only pair has no order-book rules: its
+        rule only carries the tokens' amount steps (limit orders unsupported); what a swap can take comes from the
+        pool math (quote_swap refuses an amount too small to swap)."""
         data_source = self._build_data_source()
-        markets = await data_source.get_all_markets(refresh=True)
-        self._markets_by_trading_pair = {market.trading_pair: market for market in markets.values()}
+        pairs = await data_source.get_all_pairs(refresh=True)
+        self._pairs_by_trading_pair = dict(pairs)
+        self._markets_by_trading_pair = {name: pair.market for name, pair in pairs.items() if pair.market is not None}
         self._trade_fees = await data_source.get_trade_fees()
         return [
             TradingRule(
-                trading_pair=market.trading_pair,
-                min_order_size=market.base.quantum,
-                min_price_increment=market.min_price_increment,
-                min_base_amount_increment=market.base.quantum,
-                min_quote_amount_increment=market.quote.quantum,
-                min_notional_size=market.quote.quantum * Decimal("2"),
-                buy_order_collateral_token=market.quote.symbol,
-                sell_order_collateral_token=market.base.symbol,
-                supports_limit_orders=True,
+                trading_pair=name,
+                min_order_size=pair.base.quantum,
+                min_price_increment=pair.min_price_increment,
+                min_base_amount_increment=pair.base.quantum,
+                min_quote_amount_increment=pair.quote.quantum,
+                min_notional_size=pair.quote.quantum * Decimal("2") if pair.has_book else Decimal("0"),
+                buy_order_collateral_token=pair.quote.symbol,
+                sell_order_collateral_token=pair.base.symbol,
+                supports_limit_orders=pair.has_book,
                 supports_market_orders=False,
             )
-            for market in markets.values()
+            for name, pair in pairs.items()
         ]
 
     async def _update_trading_fees(self):
@@ -1342,7 +1390,7 @@ class BeezeeExchange(ExchangePyBase):
         self._halted_denoms_loaded = True
         self._last_halted_denoms_refresh = time.time()
 
-    async def _mark_market_halted_by_chain(self, market: BeezeeMarket):
+    async def _mark_market_halted_by_chain(self, market: Union[BeezeeMarket, BeezeePair]):
         # The refusal does not name the denom: re-read the halted set, and if the node still does not list
         # this market's denoms, treat the market itself as halted until the next refresh.
         try:
@@ -1352,14 +1400,19 @@ class BeezeeExchange(ExchangePyBase):
         except Exception as error:
             self.logger().warning(f"Failed to re-read Beezee halted denoms after a halted refusal. Error: {error}")
         if self._halt_reason(market) is None:
-            self._refused_halted_market_ids.add(market.market_id)
+            self._refused_halted_market_ids.add(self._halt_key(market))
         await self._apply_halt_transitions()
 
-    def _halt_reason(self, market: BeezeeMarket) -> Optional[str]:
+    @staticmethod
+    def _halt_key(market: Union[BeezeeMarket, BeezeePair]) -> str:
+        """A market's id, or for a pool-only pair its pool id: what a chain refusal marks halted."""
+        return market.market_id or market.pool_id
+
+    def _halt_reason(self, market: Union[BeezeeMarket, BeezeePair]) -> Optional[str]:
         for denom in (market.base.denom, market.quote.denom):
             if denom in self._halted_denoms:
                 return f"denom {denom}"
-        if market.market_id in self._refused_halted_market_ids:
+        if self._halt_key(market) in self._refused_halted_market_ids:
             return "denom unknown, refused by the chain"
         return None
 
@@ -1370,6 +1423,9 @@ class BeezeeExchange(ExchangePyBase):
         for trading_pair in trading_pairs:
             try:
                 market = await data_source.get_market_by_trading_pair(trading_pair)
+            except BeezeeVenueError:
+                # A pool-only pair: its pool's denoms decide.
+                market = await data_source.get_pair(trading_pair)
             except KeyError:
                 continue
             reason = self._halt_reason(market)

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import yaml
 
@@ -79,11 +79,15 @@ class FakeBandsConnector(ConnectorBase):
         self.fill_ids: List[List[str]] = []
         self.swap_results: Dict[str, BeezeeSwapResult] = {}
         self.swap_error: Optional[Exception] = None
+        self.venues: Tuple[str, ...] = ("book", "pool")
         self._next_id = 0
 
     @property
     def name(self) -> str:
         return "beezee"
+
+    def trading_pair_venues(self, trading_pair: str) -> Tuple[str, ...]:
+        return self.venues
 
     @property
     def ready(self) -> bool:
@@ -450,6 +454,7 @@ class BeezeePriceBandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(self.connector.swaps))
 
     async def test_book_walk_stops_at_the_impact_cap(self):
+        self.connector.venues = ("book",)
         self.connector.pool = None
         self.connector.bids = [(Decimal("1.5"), Decimal("100")), (Decimal("1.3"), Decimal("1000"))]
         self.connector.asks = [(Decimal("1.6"), Decimal("100"))]
@@ -578,14 +583,63 @@ class BeezeePriceBandsTests(unittest.IsolatedAsyncioTestCase):
         self._run(2)
         self.assertEqual([], self.connector.swaps)
 
-    async def test_no_pool_defaults_to_the_book_mid(self):
+    async def test_no_pool_defaults_to_the_book_mid_and_best_takes_the_book(self):
+        self.connector.venues = ("book",)
         self.connector.pool = None
         self.connector.bids = [(Decimal("0.7"), Decimal("10"))]
         self.connector.asks = [(Decimal("0.8"), Decimal("10"))]
-        strategy = self._strategy()
+        strategy = self._strategy(venue="best")
         self._run(2)
-        self.assertEqual("pool: TOKEN-BZE has no liquidity pool", strategy._last_skip_reason)
         self.assertEqual((Decimal("0.75"), "book_mid"), strategy.reference_price())
+        self.assertEqual([], self.connector.swaps)
+        self.assertEqual([("buy", [(Decimal("0.8"), Decimal("10"))])], self.connector.fills)
+
+    async def test_a_pool_only_pair_defaults_to_the_pool_and_best_never_reads_the_book(self):
+        # A pair with a pool and no order-book market: the book is never compared or read.
+        self.connector.venues = ("pool",)
+        self._set_pool_price(Decimal("0.8"))
+        self.connector.asks = [(Decimal("0.5"), Decimal("2000"))]
+        self.connector.levels_to_take = Mock(side_effect=AssertionError("a pool-only pair has no book"))
+        strategy = self._strategy(venue="best", max_trade_quote=Decimal("1000"))
+        self._run(2)
+        self.assertIsNone(strategy._refused)
+        self.assertEqual("pool", strategy.reference_price()[1])
+        self.assertEqual([], self.connector.fills)
+        self.assertEqual(1, len(self.connector.swaps))
+        self.connector.levels_to_take.assert_not_called()
+        self.assertIn("venues: pool only", strategy.format_status())
+
+    async def test_a_pool_only_pair_with_the_pool_venue_runs(self):
+        self.connector.venues = ("pool",)
+        self._set_pool_price(Decimal("0.8"))
+        strategy = self._strategy(max_trade_quote=Decimal("1000"))
+        self._run(2)
+        self.assertIsNone(strategy._refused)
+        self.assertEqual(1, len(self.connector.swaps))
+
+    async def test_a_pair_without_the_configured_venue_is_refused_naming_it(self):
+        cases = [
+            (("book",), {}, "TOKEN-BZE has no liquidity pool (venues: order book only); price bands with venue: pool "
+                            "needs a liquidity pool"),
+            (("book",), {"venue": "best", "price_source": "pool"},
+             "TOKEN-BZE has no liquidity pool (venues: order book only); price bands with price_source: pool needs a "
+             "liquidity pool"),
+            (("pool",), {"price_source": "book_mid"},
+             "TOKEN-BZE has no order-book market (venues: pool only); price bands with price_source: book_mid needs an "
+             "order-book market"),
+        ]
+        for venues, settings, reason in cases:
+            self.connector = FakeBandsConnector("TOKEN", "BZE")
+            self.connector.venues = venues
+            self._set_pool_price(Decimal("0.8"))
+            strategy = self._strategy(**settings)
+            with patch.object(strategy, "log_with_clock") as log:
+                self._run(2)
+                self._new_blocks()
+            self.assertEqual([], self.connector.swaps)
+            self.assertEqual([], self.connector.fills)
+            self.assertEqual(1, sum("refuses to start" in str(call) for call in log.call_args_list))
+            self.assertIn(f"Refused: {reason}", strategy.format_status())
 
     # === Status and example ===
 

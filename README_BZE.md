@@ -265,10 +265,14 @@ several ticks apart (see "Seeding the book"). Checks:
 
 The connector reads the tradebin liquidity pools (AMM) of the pairs it trades. Nothing is sent to the chain for this.
 
-- **Which pool.** A pair has at most one pool, whose id is its two denoms sorted and joined by `_`. Hummingbot pairs
-  follow the order-book market (`base/quote`), so the pool's base can be the pair's quote: BZE-USDC (market
-  `ubze/ibc/81DA…`) trades against pool `ibc/81DA…_ubze`. The connector reads reserves by denom, so every price and
-  quote comes out in the pair's own orientation.
+- **Pools and markets are separate venues.** The connector lists pairs from both `all_markets` and
+  `all_liquidity_pools`: a pair has an order-book market, a pool, or both (see "Pools and markets are separate venues"
+  in the AMM run guide).
+- **Which pool.** A pair has at most one pool, whose id is its two denoms sorted and joined by `_`. A pair with a market
+  keeps the market's orientation (`base/quote`), so the pool's base can be the pair's quote: BZE-USDC (market
+  `ubze/ibc/81DA…`) trades against pool `ibc/81DA…_ubze`. A pool-only pair takes the pool's orientation (TUSDC-BZE for
+  pool `factory/…/testusd_ubze`). The connector reads reserves by denom, so every price and quote comes out in the
+  pair's own orientation.
 - **Refresh.** All pools are read once, then the pools of the traded pairs on every new block. A failed read keeps
   the last reserves and logs a warning. A pool is halted while either of its denoms is in the halted list (the same
   list the order book uses).
@@ -661,7 +665,8 @@ BZE for fees), then `start --v2 beezee_treasury_twap.yml`. `_token_bze` is a TOK
 BZE/USDC.inj and `_testnet` runs on testnet TUSDC/BZE (see "AMM run guide"). Each documents every key; a test loads
 them.
 
-**Testnet.** Use a pair with BZE on one side that has both a pool and a book, and a second wallet.
+**Testnet.** Use a pair with BZE on one side, and a second wallet. On a pool-only pair (testnet TUSDC/BZE) `venue: best`
+trades on the pool alone; the venue comparison below needs a pair with both a pool and a book.
 
 - [ ] Sell down a small total (e.g. 300 TOKEN) over 30 minutes (`duration_hours: 0.5`, `slice_interval_seconds: 300`,
       `venue: best`): one slice every 5 minutes, each within `max_impact_pct`.
@@ -698,12 +703,30 @@ route through USDC. Copy a config to `hb/conf/scripts/` (or `hb/conf/controllers
 - **A treasury buys back or sells down** a set amount over hours or days: treasury TWAP, one capped slice at a time on
   the cheaper venue.
 
-### Picking a pool and reading it against the book
+### Pools and markets are separate venues
 
-- **The pair needs a market.** The connector lists pairs from the order-book markets and only reads the pools of
-  those pairs (pool id = the two denoms sorted, joined by `_`). A pool whose pair has no market is invisible to the
-  bot: create the market first (`bzed tx tradebin create-market <base> <quote>`, fee 25,000 BZE on mainnet and
-  testnet), then restart the client so it lists the new pair.
+On BZE a liquidity pool and an order-book market are unrelated: a pool can exist with no market (the usual case for a
+community token) and a market with no pool; a pair that has both has them by coincidence. The connector lists a pair
+for every market and for every pool, and `status` shows each script's venues (`order book + pool`, `pool only`,
+`order book only`). A pair keeps the same name whatever venues it has: a market's pair is named after the market, a
+pool-only pair after the pool's two denoms (sorted, as the chain stores the pool), from the denoms' metadata either way.
+
+- **Pool only**: pool volume, and bands and TWAP with `venue: pool`, run on any pool, with or without a market.
+- **Book only**: volume target, TWAP with `venue: book` and upstream order-book strategies run on any market, with or
+  without a pool.
+- **Both**: the pool/book arbitrage and the pool-anchored controller (it quotes on the book and anchors on the pool)
+  refuse to start, once and naming the missing venue, on a pair that lacks one. The controller still falls back to the
+  book mid on a market without a pool, as documented above.
+- `venue: best` (bands, TWAP) uses whatever venue the pair has and compares the two only when it has both. The bands'
+  default `price_source` is the pool when the pair has one, else the book mid.
+- On a pool-only pair the order-book calls (orders, cancels, `fill_orders`, `levels_to_take`) are refused with a clear
+  error and never sent, and its order book stays empty; the pool calls work as on any pool. On a pair without a pool
+  the pool calls return None or refuse, as before.
+
+To trade a pool-only pair on the book too, create its market (`bzed tx tradebin create-market <base> <quote>`, fee
+25,000 BZE on mainnet and testnet) and restart the client.
+
+### Picking a pool and reading it against the book
 - **BZE on one side.** Every AMM script pays the fees and the gas in BZE, so the arbitrage, pool volume, bands and
   TWAP scripts refuse a pair without BZE, and hedge mode needs it too.
 - **Fee and depth.** `/bze/tradebin/all_liquidity_pools` on a REST endpoint lists every pool with its `fee` and
@@ -793,8 +816,10 @@ bot's included; the arb script would take the controller's own quotes). Give eve
 
 Testnet (`bzetestnet-3`, October 2026) has one order-book market, `ULMN-TUSDC`, which has no pool and no BZE side, so
 none of the AMM scripts can use it. The pools with BZE are TUSDC/BZE (`factory/…/testusd_ubze`, fee 0.2%, about 1.31
-BZE per TUSDC), ULMN/BZE (fee 0.1%) and VDL/BZE (fee 0.3%). The testnet configs use **TUSDC/BZE**, whose market has
-to be created once (25,000 testnet BZE, paid by the creating wallet):
+BZE per TUSDC), ULMN/BZE (fee 0.1%) and VDL/BZE (fee 0.3%); the connector lists them as pool-only pairs. The testnet
+configs use **TUSDC/BZE** (`TUSDC-BZE`). Pool volume, price bands and treasury TWAP run on its pool as it is, with no
+market. The arbitrage and the pool-anchored controller need a market too, which has to be created once for them
+(25,000 testnet BZE, paid by the creating wallet):
 
 ```bash
 bzed tx tradebin create-market factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd ubze \
@@ -802,9 +827,9 @@ bzed tx tradebin create-market factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3
   --node https://testnet-rpc.getbze.com:443 --gas 300000 --fees 3000ubze
 ```
 
-Then restart the client: the connector lists the market as `TUSDC-BZE` (check it in the pair autocomplete; the
-testnet configs use that name). Check that `/bze/tradebin/all_markets` on `https://testnet.getbze.com` shows it first;
-once it exists, skip this step. The run itself follows "Testnet run" with the config of the script.
+Then restart the client: the pair keeps its name `TUSDC-BZE` and `status` shows `order book + pool`. Check that
+`/bze/tradebin/all_markets` on `https://testnet.getbze.com` shows it first; once it exists, skip this step. The run
+itself follows "Testnet run" with the config of the script.
 
 ## Connector behaviour on chain v8.2.0
 

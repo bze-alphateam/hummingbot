@@ -2,7 +2,7 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 from test.hummingbot.connector.exchange.beezee.test_beezee_price_bands import STEP, TAKER_FEE, FakeBandsConnector
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import yaml
 
@@ -272,6 +272,50 @@ class BeezeeTreasuryTwapTests(unittest.IsolatedAsyncioTestCase):
         self._start()
         self.assertEqual([], self.connector.fills)
         self.assertEqual("buy", self.connector.swaps[-1][0])
+
+    async def test_best_on_a_pool_only_pair_trades_the_pool_and_never_reads_the_book(self):
+        self.connector.venues = ("pool",)
+        self.connector.bids = [(Decimal("1.5"), Decimal("1000"))]
+        self.connector.levels_to_take = Mock(side_effect=AssertionError("a pool-only pair has no book"))
+        strategy = self._strategy(venue="best")
+        self._start()
+        self.assertIsNone(strategy._refused)
+        self.assertEqual([Decimal("100")], self._swapped())
+        self.assertEqual([], self.connector.fills)
+        self.connector.levels_to_take.assert_not_called()
+        self.assertEqual("pool", strategy.reference_price()[1])
+        self.assertIn("venues: pool only", strategy.summary())
+
+    async def test_best_on_a_book_only_pair_trades_the_book_around_the_book_mid(self):
+        self.connector.venues = ("book",)
+        self.connector.pool = None
+        self.connector.bids = [(Decimal("0.95"), Decimal("1000"))]
+        self.connector.asks = [(Decimal("1.05"), Decimal("1000"))]
+        strategy = self._strategy(venue="best")
+        self._start()
+        self.assertEqual([], self.connector.swaps)
+        self.assertEqual([("sell", [(Decimal("0.95"), Decimal("100"))])], self.connector.fills)
+        self.assertEqual((Decimal("1.00"), "book_mid"), strategy.reference_price())
+
+    async def test_a_pair_without_the_configured_venue_is_refused_naming_it(self):
+        cases = [
+            (("book",), "pool", "TOKEN-BZE has no liquidity pool (venues: order book only); treasury TWAP with venue: "
+                                "pool needs a liquidity pool"),
+            (("pool",), "book", "TOKEN-BZE has no order-book market (venues: pool only); treasury TWAP with venue: "
+                                "book needs an order-book market"),
+        ]
+        for venues, venue, reason in cases:
+            self.connector = FakeBandsConnector("TOKEN", "BZE")
+            self.connector.venues = venues
+            self.connector.bids = [(Decimal("1.0"), Decimal("1000"))]
+            strategy = self._strategy(venue=venue)
+            with patch.object(strategy, "log_with_clock") as log:
+                self._start()
+                self._next_slice()
+            self.assertEqual([], self.connector.swaps)
+            self.assertEqual([], self.connector.fills)
+            self.assertEqual(1, sum("refuses to start" in str(call) for call in log.call_args_list))
+            self.assertIn(f"Refused: {reason}", strategy.format_status())
 
     async def test_book_walk_stops_at_the_impact_cap(self):
         self.connector.bids = [(Decimal("1.0"), Decimal("30")), (Decimal("0.98"), Decimal("30")),

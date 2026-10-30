@@ -38,7 +38,10 @@ class BeezeeAPIDataSourceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_get_all_markets_builds_symbol_map_and_market_cache(self):
-        self.data_source._paged_request = AsyncMock(return_value=[{"base": "ubze", "quote": "uusdc"}])
+        # Markets from all_markets; no liquidity pools.
+        self.data_source._paged_request = AsyncMock(
+            side_effect=lambda path_url, item_key, **kwargs: [{"base": "ubze", "quote": "uusdc"}] if item_key == "market" else []
+        )
         metadata_by_denom = {
             "ubze": {
                 "symbol": "BZE",

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from pydantic import Field
 
 from hummingbot.connector.connector_base import ConnectorBase
+from hummingbot.connector.exchange.beezee.beezee_utils import VENUE_BOOK, describe_venues, venue_refusal
 from hummingbot.core.clock import Clock
 from hummingbot.core.data_type.common import MarketDict, OrderType, TradeType
 from hummingbot.core.data_type.limit_order import LimitOrder
@@ -145,6 +146,8 @@ class BeezeeVolumeTarget(StrategyV2Base):
         self._last_skip_reason: Optional[str] = None
         self._last_anchor_source: Optional[str] = None
         self._last_book_mid: Optional[Decimal] = None
+        self._refused: Optional[str] = None
+        self._venue_checked = False
 
     @staticmethod
     def _build_coingecko_feed() -> CoinGeckoTickersFeed:
@@ -176,6 +179,8 @@ class BeezeeVolumeTarget(StrategyV2Base):
 
     def on_tick(self):
         self._roll_day()
+        if self._refused is not None or not self._check_venue():
+            return
         self._refresh_anchor_if_due()
         if self.current_timestamp < self._next_cycle_timestamp:
             return
@@ -187,6 +192,17 @@ class BeezeeVolumeTarget(StrategyV2Base):
         if skip_reason != self._last_skip_reason and skip_reason is not None:
             self.log_with_clock(logging.INFO, f"Volume target cycle skipped: {skip_reason}")
         self._last_skip_reason = skip_reason
+
+    def _check_venue(self) -> bool:
+        """The pair needs an order-book market (a liquidity pool is not needed): the volume is printed on the book."""
+        if self._venue_checked:
+            return True
+        self._refused = venue_refusal(self.connector, self.config.trading_pair, (VENUE_BOOK,), "volume target")
+        if self._refused is not None:
+            self.log_with_clock(logging.ERROR, f"Volume target refuses to start: {self._refused}")
+            return False
+        self._venue_checked = True
+        return True
 
     def _roll_day(self):
         day = utc_day(self.current_timestamp)
@@ -436,6 +452,8 @@ class BeezeeVolumeTarget(StrategyV2Base):
     # === Status ===
 
     def format_status(self) -> str:
+        if self._refused is not None:
+            return f"  Refused: {self._refused}"
         if not self.ready_to_trade:
             return "Market connectors are not ready."
         quote = self.config.trading_pair.split("-", 1)[1]
@@ -444,6 +462,8 @@ class BeezeeVolumeTarget(StrategyV2Base):
         cost_per_1000 = self.spend_today / filled * 1000 if filled > 0 else None
         age = self.anchor_age
         lines = [
+            f"  Pair: {self.config.trading_pair}   venues: "
+            f"{describe_venues(self.connector.trading_pair_venues(self.config.trading_pair))}",
             f"  Day (UTC): {self._day}",
             f"  Target / filled / remaining: {self.config.daily_volume_quote} / {filled} / "
             f"{max(self.remaining_quote, Decimal('0'))} {quote}",

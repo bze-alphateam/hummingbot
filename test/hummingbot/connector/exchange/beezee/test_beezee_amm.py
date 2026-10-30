@@ -28,6 +28,7 @@ from hummingbot.connector.exchange.beezee.beezee_pool_price_delegate import Beez
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeConfigMap,
     BeezeeMainnetNetworkMode,
+    BeezeePair,
     BeezeeReadOnlyAccountMode,
     market_from_data,
 )
@@ -96,8 +97,9 @@ class FakePoolSource:
         self.pool_calls.append(pool_id)
         return self.pools.get(pool_id)
 
-    async def get_market_by_trading_pair(self, trading_pair: str):
-        return MARKETS[trading_pair]
+    async def get_pair(self, trading_pair: str) -> BeezeePair:
+        market = MARKETS[trading_pair]
+        return BeezeePair(base=market.base, quote=market.quote, market=market)
 
 
 class BeezeeAmmMathTests(unittest.TestCase):
@@ -372,7 +374,8 @@ class BeezeeExchangePoolTests(unittest.IsolatedAsyncioTestCase):
         data_source = Mock()
         data_source.get_all_liquidity_pools = AsyncMock(side_effect=self.source.get_all_liquidity_pools)
         data_source.get_liquidity_pool = AsyncMock(side_effect=self.source.get_liquidity_pool)
-        data_source.get_market_by_trading_pair = AsyncMock(side_effect=self.source.get_market_by_trading_pair)
+        data_source.get_pair = AsyncMock(side_effect=self.source.get_pair)
+        data_source.get_market_by_trading_pair = AsyncMock(side_effect=lambda pair: MARKETS[pair])
         data_source.get_halted_denoms = AsyncMock(return_value=set())
         self.data_source = data_source
         self.exchange._data_source = data_source

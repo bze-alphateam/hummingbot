@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeMarket,
@@ -15,12 +15,13 @@ class BeezeeOrderBook(OrderBook):
     def snapshot_message_from_exchange(
         cls,
         trading_pair: str,
-        market: BeezeeMarket,
+        market: Optional[BeezeeMarket],
         bids: List[Dict[str, Any]],
         asks: List[Dict[str, Any]],
         update_id: int,
         timestamp: float,
     ) -> OrderBookMessage:
+        # `market` is None only for the empty book of a pair with no order-book market.
         return OrderBookMessage(
             OrderBookMessageType.SNAPSHOT,
             {

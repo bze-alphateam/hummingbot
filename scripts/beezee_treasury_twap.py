@@ -12,6 +12,7 @@ from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.exchange.beezee.beezee_amm import BeezeeSwapError
 from hummingbot.connector.exchange.beezee.beezee_fills import BeezeeFillError
 from hummingbot.connector.exchange.beezee.beezee_pool_price_delegate import BeezeePoolPriceDelegate
+from hummingbot.connector.exchange.beezee.beezee_utils import VENUE_POOL, describe_venues, venue_refusal
 from hummingbot.core.data_type.common import MarketDict, OrderType, PriceType, TradeType
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
@@ -48,7 +49,8 @@ class BeezeeTreasuryTwapConfig(StrategyV2ConfigBase):
     max_impact_pct: Decimal = Field(Decimal("0.5"), gt=0)
     # Never buy above / sell below this price (quote per base, fees not included). Empty = no limit.
     limit_price: Optional[Decimal] = Field(None, gt=0)
-    # Where a slice goes: the pool, taking the book, or the cheaper of both (never split across both).
+    # Where a slice goes: the pool, taking the book, or the cheaper of both (never split across both). A pool and an
+    # order-book market are separate venues: "best" uses whatever venue the pair has and compares only when it has both.
     venue: Literal["pool", "book", "best"] = Field("best")
     # A pool swap is refused by the chain when it would pay out more than this % less than quoted.
     slippage_pct: Decimal = Field(Decimal("0.5"), ge=0, lt=100)
@@ -211,14 +213,23 @@ class BeezeeTreasuryTwap(StrategyV2Base):
         self._run_slice(index)
 
     def _check_start(self) -> bool:
-        """Refuses a reserve above the balance and a pair without the native token (BZE) on one side, since the fees
-        and the gas are paid in it."""
+        """Refuses a pair without the configured venue (a pool for `venue: pool`, a market for `venue: book`), a reserve
+        above the balance and a pair without the native token (BZE) on one side, since the fees and the gas are paid
+        in it."""
         if self._started:
             return True
         taker = self._taker_fee_token()
         native = taker[0] if taker is not None else "BZE"
         config = self.config
-        if native not in (self.base, self.quote):
+        if config.venue != BEST:
+            missing_venue = venue_refusal(self.connector, self.pair, (config.venue,), f"treasury TWAP with venue: {config.venue}")
+        elif not self.venues:
+            missing_venue = f"{self.pair} has neither a liquidity pool nor an order-book market"
+        else:
+            missing_venue = None
+        if missing_venue is not None:
+            reason = missing_venue
+        elif native not in (self.base, self.quote):
             reason = (
                 f"{self.pair} has no {native} side: the fees and the gas are paid in {native} and cannot be counted "
                 f"in the pair's terms. Pick a pair with {native} as base or quote."
@@ -245,6 +256,10 @@ class BeezeeTreasuryTwap(StrategyV2Base):
             f"in {self.slice_count} slices of about {self.even_slice:.10g} {self.base}.",
         )
         return True
+
+    @property
+    def venues(self) -> Tuple[str, ...]:
+        return tuple(self.connector.trading_pair_venues(self.pair))
 
     # === One slice ===
 
@@ -284,7 +299,7 @@ class BeezeeTreasuryTwap(StrategyV2Base):
     def reference_price(self) -> Optional[Tuple[Decimal, str]]:
         """(price, source): the pool price through the pool price delegate when the pair has a pool, the order-book
         mid otherwise."""
-        if self.connector.get_pool(self.pair) is not None:
+        if VENUE_POOL in self.venues:
             price = self.delegate.get_price_by_type(PriceType.MidPrice)
             return None if price.is_nan() else (price, POOL)
         bid, ask = self._best_bid_ask()
@@ -312,7 +327,9 @@ class BeezeeTreasuryTwap(StrategyV2Base):
             return f"no {token} above the reserve"
         plans: List[SlicePlan] = []
         reasons: List[str] = []
-        venues = [self.config.venue] if self.config.venue != BEST else [POOL, BOOK]
+        venues = [self.config.venue] if self.config.venue != BEST else [
+            venue for venue in (POOL, BOOK) if venue in self.venues
+        ]
         for venue in venues:
             plan = self._plan_pool(size, spendable) if venue == POOL else self._plan_book(size, spendable)
             if isinstance(plan, SlicePlan):
@@ -595,7 +612,8 @@ class BeezeeTreasuryTwap(StrategyV2Base):
         venues = ", ".join(f"{venue} {count}" for venue, count in sorted(self._slices_traded.items())) or "none"
         skips = "; ".join(f"{reason} ×{count}" for reason, count in self._skips.most_common()) or "none"
         return "\n".join([
-            f"  Pair: {self.pair}   side: {config.side}   venue: {config.venue}   catch_up: {config.catch_up}",
+            f"  Pair: {self.pair}   side: {config.side}   venue: {config.venue}   catch_up: {config.catch_up}   "
+            f"venues: {describe_venues(self.venues)}",
             f"  Done: {fmt(self._done_base)} / {fmt(config.total_amount)} {self.base} "
             f"({self._done_base / config.total_amount * 100:.2f}%) for {self._done_quote:.10g} {self.quote}, "
             f"left {fmt(self.remaining)} {self.base}",

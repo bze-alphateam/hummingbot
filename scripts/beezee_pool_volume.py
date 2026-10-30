@@ -10,6 +10,7 @@ from pydantic import Field
 
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.exchange.beezee.beezee_amm import BeezeeSwapError, BeezeeSwapRequest, BeezeeSwapResult
+from hummingbot.connector.exchange.beezee.beezee_utils import VENUE_POOL, describe_venues, venue_refusal
 from hummingbot.core.data_type.common import MarketDict, OrderType, TradeType
 from hummingbot.core.event.events import BuyOrderCompletedEvent, MarketOrderFailureEvent, SellOrderCompletedEvent
 from hummingbot.strategy.strategy_v2_base import StrategyV2Base, StrategyV2ConfigBase
@@ -144,16 +145,21 @@ class BeezeePoolVolume(StrategyV2Base):
         self._last_skip_reason = skip_reason
 
     def _check_pair(self) -> bool:
-        """Tradebin fees and gas are paid in the native token (BZE), so one side of the pair must be it."""
+        """The pair needs a liquidity pool (an order-book market is not needed). Tradebin fees and gas are paid in the
+        native token (BZE), so one side of the pair must be it."""
         if self._native is not None:
             return True
         taker = self._taker_fee_token()
         native = taker[0] if taker is not None else "BZE"
-        if native not in (self.base, self.quote):
+        no_pool = venue_refusal(self.connector, self.pair, (VENUE_POOL,), "pool volume")
+        if no_pool is not None:
+            self._refused = no_pool
+        elif native not in (self.base, self.quote):
             self._refused = (
                 f"{self.pair} has no {native} side: the fees and the gas are paid in {native} and cannot be counted "
                 f"in the pair's terms. Pick a pair with {native} as base or quote."
             )
+        if self._refused is not None:
             self.log_with_clock(logging.ERROR, f"Pool volume refuses to start: {self._refused}")
             return False
         self._native = native
@@ -412,7 +418,8 @@ class BeezeePoolVolume(StrategyV2Base):
             next_swap = "-"
         drift_value = self._quote_drift_today + self._base_drift_today * price if price is not None else None
         lines = [
-            f"  Pair: {self.pair}{' (HALTED)' if self._halted else ''}   day (UTC): {self._day}",
+            f"  Pair: {self.pair}{' (HALTED)' if self._halted else ''}   venues: "
+            f"{describe_venues(self.connector.trading_pair_venues(self.pair))}   day (UTC): {self._day}",
             f"  Target / done / remaining: {fmt(self.config.daily_volume_quote)} / {fmt(volume)} / "
             f"{fmt(max(self.remaining_quote, Decimal('0')))} {self.quote}",
             f"  Next swap: {next_swap}",

@@ -81,11 +81,15 @@ class FakeArbConnector(ConnectorBase):
         self.swap_results: Dict[str, BeezeeSwapResult] = {}
         self.fill_error: Optional[Exception] = None
         self.swap_error: Optional[Exception] = None
+        self.venues: Tuple[str, ...] = ("book", "pool")
         self._next_id = 0
 
     @property
     def name(self) -> str:
         return "beezee"
+
+    def trading_pair_venues(self, trading_pair: str) -> Tuple[str, ...]:
+        return self.venues
 
     @property
     def ready(self) -> bool:
@@ -340,6 +344,30 @@ class BeezeePoolBookArbTests(unittest.IsolatedAsyncioTestCase):
         plan = strategy.plan_arb(POOL_TO_BOOK, Decimal("0.5"), fixed)
         cost = self.connector.quote_input_for_output("BZE-USDC", "buy", Decimal("1000")).input
         self.assertEqual(Decimal("520") - cost - fixed, plan.net_profit)
+
+    async def test_a_pair_missing_a_venue_is_refused_once_naming_it(self):
+        cases = {
+            ("pool",): "TOKEN-BZE has no order-book market (venues: pool only); pool/book arb needs a liquidity pool "
+                       "and an order-book market",
+            ("book",): "TOKEN-BZE has no liquidity pool (venues: order book only); pool/book arb needs a liquidity pool "
+                       "and an order-book market",
+        }
+        for venues, reason in cases.items():
+            self.connector = FakeArbConnector("TOKEN", "BZE")
+            self.connector.venues = venues
+            self.connector.asks = [(Decimal("0.9"), Decimal("1000"))]
+            strategy = self._strategy()
+            with patch.object(strategy, "log_with_clock") as log:
+                self._run(30)
+                self._run(30)
+            self.assertEqual([], self.connector.sent)
+            self.assertEqual(1, sum("refuses to start" in str(call) for call in log.call_args_list))
+            self.assertIn(f"Refused: {reason}", self._status(strategy))
+
+    async def test_status_shows_the_venues(self):
+        strategy = self._strategy()
+        self._run(2)
+        self.assertIn("venues: order book + pool", self._status(strategy))
 
     async def test_a_pair_without_bze_is_refused(self):
         self.connector = FakeArbConnector("TOKEN", "USDC")

@@ -4,7 +4,8 @@ This connector integrates Beezee DEX spot markets through the Beezee chain `trad
 
 ## v1 support
 
-- Market discovery from `/bze/tradebin/all_markets`
+- Pair discovery from `/bze/tradebin/all_markets` and `/bze/tradebin/all_liquidity_pools`: a pair has an order-book
+  market, a liquidity pool, or both (the two are unrelated on chain)
 - Trading rule synthesis from denom metadata and `tradebin` params
 - Order book snapshots
 - Block-driven polling diffs and public trade updates
