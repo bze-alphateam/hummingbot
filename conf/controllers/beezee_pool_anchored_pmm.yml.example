@@ -1,0 +1,64 @@
+#########################################################
+###  Pool-anchored market making: BZE/USDC.inj       ###
+#########################################################
+# Copy to conf/controllers/beezee_pool_anchored_pmm.yml, set total_amount_quote, then create a
+# v2_with_controllers script config that lists it and `start --v2 <that script config>.yml`.
+# Quotes on the BeeZee order book around the pair's liquidity pool price (not the book's own mid), never closer to
+# the pool price than the pool fee + min_spread_over_pool_fee_pct, and requotes when the pool moves more than
+# requote_threshold_pct. Optional hedge mode swaps each profitable fill back on the pool.
+# How it works and what it costs: README_BZE.md, section "Pool-anchored market making".
+# Network: beezee-1. In `connect beezee` pick network `mainnet` (gas price 0.01 ubze).
+
+id: beezee_pool_anchored_pmm_bze_usdc
+controller_name: beezee_pool_anchored_pmm
+controller_type: market_making
+connector_name: beezee
+
+# BZE quoted in USDC bridged from Injective (USDC.inj): market ubze/ibc/81DA528F…, pool ibc/81DA528F…_ubze
+# (pool fee 0.1%). USDC.inj has no display unit on chain, so the bot counts it in base units (1 = 0.000001 USDC) and
+# the BZE price shows as about 333 instead of 0.000333.
+trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+
+# Budget for all levels together, in the quote token (here USDC.inj base units: 200000000 = 200 USDC), split between
+# the buy and sell levels by the *_amounts_pct below. Placeholder: size it to your inventory. The sell levels need
+# the BZE, the buy levels the USDC.inj, plus BZE for the fees. The chain refuses an order smaller than
+# ceil(1 / chain price) x 2 base units (about 0.006 BZE here).
+total_amount_quote: 200000000
+
+# Distance of each level from the pool price, as fractions (0.005 = 0.5%). A level closer than the spread floor
+# (pool fee 0.1% + min_spread_over_pool_fee_pct) is placed at the floor instead.
+buy_spreads: "0.005,0.01,0.02"
+sell_spreads: "0.005,0.01,0.02"
+buy_amounts_pct: "40,30,30"
+sell_amounts_pct: "40,30,30"
+
+# Every quote keeps at least the pool fee + this from the pool price, in % (0.1 + the 0.1% pool fee = 0.2%).
+min_spread_over_pool_fee_pct: 0.1
+
+# Requote as soon as the pool price moved this far (in %) from where the quotes were placed.
+requote_threshold_pct: 0.2
+
+# Quotes untouched for this long are replaced anyway (seconds), and a level waits cooldown_time after a stop loss
+# (and, in hedge mode, after a fill).
+executor_refresh_time: 300
+cooldown_time: 15
+
+# Without hedge mode a filled quote is closed on the book by a take-profit limit order this far from its price
+# (fraction). The stop loss, the time limit and the position rebalance close or buy with market orders, which the
+# BeeZee book does not take: leave them off.
+take_profit: 0.01
+take_profit_order_type: LIMIT
+stop_loss:
+time_limit:
+skip_rebalance: true
+leverage: 1
+
+# Hedge mode: swap each fill back on the pool in the opposite direction, so the inventory stays flat and the spread
+# minus the pool fee is kept. A fill is hedged only when its distance from the pool price covers the pool fee, the
+# hedge's taker fee (0.1 BZE) + estimated_gas_bze (in % of the fill's value) and min_hedge_profit_pct. The fills of
+# one block go out as one swap; a failed hedge is logged and the inventory kept, never retried.
+hedge_fills_on_pool: false
+hedge_slippage_pct: 0.5
+min_hedge_profit_pct: 0.1
+# Gas of one swap tx in BZE: about 150,000 gas x 0.01 ubze = 0.0015 BZE.
+estimated_gas_bze: 0.005
