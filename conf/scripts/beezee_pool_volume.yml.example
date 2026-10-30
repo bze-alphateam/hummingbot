@@ -1,0 +1,59 @@
+#########################################################
+###  Pool volume on BeeZee mainnet: BZE/USDC.inj      ###
+#########################################################
+# Copy to conf/scripts/beezee_pool_volume.yml, set the volume and the fee cap, then
+#   start --v2 beezee_pool_volume.yml
+# Every cycle_seconds the script swaps one token of the pair for the other on the pair's liquidity pool and back
+# again, both legs in one tx (two MsgMultiSwap). It trades this one pool only, in the pair's own terms: no route
+# through other pools. Pool fees, tradebin taker fees and gas are the cost; the inventory otherwise stays put.
+# How it works and what it costs: README_BZE.md, section "Pool volume".
+# Network: beezee-1. In `connect beezee` pick network `mainnet` (gas price 0.01 ubze).
+
+script_file_name: beezee_pool_volume.py
+controllers_config: []
+
+exchange: beezee
+
+# BZE quoted in USDC bridged from Injective (USDC.inj): pool ibc/81DA528F…_ubze, pool fee 0.1% (to the LPs).
+# The chain's metadata gives USDC.inj no display unit, so the bot counts it in base units (1 = 0.000001 USDC).
+# Volumes and swap bounds below are in the same units. One side of the pair must be BZE: the fees and the gas are
+# paid in BZE and converted with the pair's own price.
+trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+
+# Volume to print per UTC day, in USDC.inj base units: 20000000 = 20 USDC. Both legs of a round trip count.
+# Placeholder: set your own target.
+daily_volume_quote: 20000000
+
+# One round trip per cycle. 900 s = 96 cycles a day. Each round trip pays 2 taker fees + gas whatever its size,
+# so fewer, larger cycles cost less.
+cycle_seconds: 900
+
+# Bounds of one leg, in USDC.inj base units (a BZE leg is valued at the pool price). Each cycle swaps
+# (volume still to do today / cycles left today / 2), clamped to these.
+min_swap_amount: 10000
+max_swap_amount: 5000000
+
+# Leg 1 spends at most this % of the pool's reserve of its input token, whatever the target asks.
+max_reserve_share_pct: 0.5
+
+# Balances the script never touches. The wallet needs both tokens (it alternates which goes first), plus BZE for the
+# fees (2 x 0.1 BZE taker fee + gas per round trip).
+reserve_base: 100
+reserve_quote: 0
+
+# The chain refuses a leg rather than pay out more than this % below its quote.
+slippage_pct: 0.5
+
+# Leg 2 swaps back leg 1's quoted output less this %, and never more than leg 1's minimum output, so it only spends
+# what leg 1 delivered. The leftover stays on that side; alternating the first token evens it out.
+safety_pct: 0.5
+
+# Pool fees + tradebin taker fees + gas per UTC day, in BZE. Reaching it stops the script until UTC midnight.
+# 20 USDC a day costs about 60 BZE of pool fees + 96 x 0.205 BZE of taker fees and gas = about 80 BZE.
+max_daily_fee_spend: 100
+
+# Skip a cycle when the pool price moved more than this % since the last one (someone else is trading heavily).
+max_price_move_pct: 2
+
+# Gas of one round-trip tx in BZE, kept free on the BZE balance: about 300,000 gas x 0.01 ubze = 0.003 BZE.
+estimated_gas_bze: 0.005

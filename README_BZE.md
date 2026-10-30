@@ -275,7 +275,8 @@ The connector reads the tradebin liquidity pools (AMM) of the pairs it trades. N
 - **Pool price.** `connector.get_pool_price(trading_pair)` is the pool's quote reserve over its base reserve, in the
   units of the pair's order prices (display units, quote per base), so it compares directly with the book. `None`
   when there is no pool or it is empty. `connector.get_pool(trading_pair)` gives the pool itself (reserves in base
-  units, fee, `halted`).
+  units, fee, `halted`), and `connector.get_pool_reserves(trading_pair)` its `(base, quote)` reserves in the pair's
+  orientation and display units.
 - **Quotes.** `connector.quote_swap(trading_pair, side, amount)` tells what a swap of `amount` input pays out: on
   `"buy"` the input is quote and the output base, on `"sell"` the reverse. `connector.quote_input_for_output(...)`
   starts from the output wanted (base on a buy, quote on a sell) and returns the input that gets at least that much.
@@ -407,6 +408,73 @@ loads it.
 - [ ] A gap smaller than the pool fee + taker fees + `min_profit_pct` sends nothing; `status` says why.
 - [ ] Cancel the second wallet's ask in the same block as the arb (or let another wallet take it first): the fill is
       refunded, `status` shows the imbalance, and one rebalance swap follows (or it is kept), never more.
+
+## Pool volume
+
+`scripts/beezee_pool_volume.py` prints a set daily volume on one pair's liquidity pool with round trips. Every
+`cycle_seconds` it swaps one token of the pair for the other and back again. One message cannot use the same pool
+twice, so the round trip is two `MsgMultiSwap` in one tx (`amm_swaps`): A→B, then B→A. Swaps settle inside the tx,
+so leg 2 spends what leg 1 delivered. The pair is traded in its own terms on its own pool: a TOKEN/BZE bot never
+routes through BZE → USDC. A pair without BZE on either side is refused at start (logged, shown in `status`), since
+the fees and the gas are paid in BZE.
+
+Each cycle:
+
+1. **Target and pace.** `remaining = daily_volume_quote − volume today` (UTC day, in the pair's quote, both legs
+   counted). One leg is `remaining / cycles left today / 2` in quote, clamped to `[min_swap_amount,
+   max_swap_amount]`. Leg 1's input is then capped at `max_reserve_share_pct` (default 0.5) % of the pool's reserve
+   of that token, and at the balance above `reserve_base` / `reserve_quote` (less the fees on the BZE side). A leg
+   that ends up below `min_swap_amount` is not sent. Once the target is reached it idles until UTC midnight, when the
+   day's counters start from zero.
+2. **Direction.** The token that goes first alternates every cycle. When the balance of one side cannot pay for leg
+   1, it starts from the other side; when neither can, the cycle is skipped with both reasons.
+3. **Send.** Leg 1 with `min_output` = its quote − `slippage_pct` %. Leg 2 puts back leg 1's quoted output less
+   `safety_pct` % (never more than leg 1's minimum output, so it never spends what the wallet held before the tx),
+   with its own `min_output` on the pool as leg 1 leaves it. The small leftover of leg 1 stays on its output side;
+   alternating the first token evens it out.
+4. **Account.** From the swap results: volume (the quote side of each leg: what left on a buy, what arrived on a
+   sell), pool fees, 2 tradebin taker fees (one per message), gas, and the inventory change. Reaching
+   `max_daily_fee_spend` (BZE: pool fees + taker fees + gas) stops it until UTC midnight.
+5. **Price guard.** When the pool price moved more than `max_price_move_pct` since the last cycle, someone else is
+   trading heavily: the cycle is skipped so the script does not amplify the move.
+6. **Halted** pool (either denom halted by governance, or a refusal saying so): nothing is sent while it lasts,
+   logged once. Only one round trip is in flight at a time.
+
+`status` shows the target, done and remaining volume, the next leg's size and its share of the reserves, the pool
+price, the day's cost split (pool fees, taker fees, gas) against the cap, the cost per 1,000 quote of volume, the
+inventory drift from the swaps and the last skip reason. The counters live in memory: a restart starts the day's
+volume and spend from zero.
+
+**Cost.** A round trip costs 2 × the pool fee on its size (to the LPs) + 2 × the tradebin taker fee + gas. The pool
+fee scales with the volume, the rest is fixed per round trip, so fewer, larger cycles are cheaper. A bot owner who is
+also an LP in that pool gets their share of the pool fee back. Example on BZE/USDC.inj (pool fee 0.1%, taker fee
+0.1 BZE, gas about 0.005 BZE, BZE at 0.000333 USDC), 20 USDC a day at `cycle_seconds: 900` (96 round trips of about
+0.104 USDC per leg):
+
+| | per day |
+|---|---|
+| pool fees: 0.1% × 20 USDC = 0.02 USDC | about 60 BZE |
+| taker fees: 96 × 2 × 0.1 BZE | 19.2 BZE |
+| gas: 96 × 0.005 BZE | 0.48 BZE |
+| total | about 80 BZE, i.e. about 4 BZE per USDC of volume |
+
+**Run.** `cp conf/scripts/beezee_pool_volume.yml.example hb/conf/scripts/beezee_pool_volume.yml`, set
+`daily_volume_quote` and `max_daily_fee_spend`, fund the wallet with both tokens (plus BZE for fees), then
+`start --v2 beezee_pool_volume.yml`. The example is for BZE/USDC.inj on mainnet and documents every key; a test
+loads it.
+
+**Testnet.** Use a pair with BZE on one side that has a pool.
+
+- [ ] With a small `daily_volume_quote` and `cycle_seconds: 60`, run for about 30 minutes: the pool volume BZE Scan
+      shows for the bot's address matches what `status` reports, and the inventory changes only by the fees (pool
+      fees, taker fees, gas) plus the small leftover `status` shows as drift.
+- [ ] Each cycle is one tx with two `MsgMultiSwap` on the same pool, A→B then B→A; the token that goes first
+      alternates.
+- [ ] No leg is larger than `max_reserve_share_pct` % of the pool's reserve, and the balances never go below
+      `reserve_base` / `reserve_quote`.
+- [ ] With `max_daily_fee_spend` set low, it stops with "daily fee cap reached".
+- [ ] A large swap from a second wallet between two cycles (more than `max_price_move_pct`) skips the next cycle with
+      that reason in `status`.
 
 ## Pool-anchored market making
 
