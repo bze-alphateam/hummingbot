@@ -1,0 +1,46 @@
+#########################################################
+###  Pool <-> order-book arbitrage: testnet TUSDC/BZE ###
+#########################################################
+# Copy to conf/scripts/beezee_pool_book_arb_testnet.yml, then
+#   start --v2 beezee_pool_book_arb_testnet.yml
+# Takes the asks below the pool price and sells the same TUSDC on the pool, or buys TUSDC on the pool and sells it
+# into the bids above the pool price. Both legs go out in one tx (MsgFillOrders + MsgMultiSwap).
+# How it works and what it costs: README_BZE.md, sections "Pool / order-book arbitrage" and "AMM run guide".
+# Network: bzetestnet-3. In `connect beezee` pick network `testnet` with the endpoints of README_BZE.md "Testnet run"
+# and gas price 0.01 ubze (the testnet minimum; 0.001 is refused).
+
+script_file_name: beezee_pool_book_arb.py
+controllers_config: []
+
+exchange: beezee
+
+# TUSDC quoted in BZE: market factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd / ubze, pool
+# factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd_ubze (pool fee 0.2%, about 1.31 BZE per TUSDC in
+# October 2026). The pool exists; the market has to be created once before the first run (README_BZE.md,
+# "AMM run guide", testnet pair). Both sides display with 6 decimals, so every amount below is in whole tokens.
+trading_pair: "TUSDC-BZE"
+
+# Profit an arb must keep after every fee, in % of what it spends.
+min_profit_pct: 0.3
+
+# Largest arb, in TUSDC (about 65 BZE). Small on purpose: testnet funds only.
+max_trade_base: 50
+
+# Balances the script never touches: TUSDC, then BZE. The BZE reserve keeps the fees paid.
+reserve_base: 0
+reserve_quote: 20
+
+# The chain refuses the swap rather than pay out more than this % below the quote.
+slippage_pct: 0.5
+
+# A refunded book fill is swapped back on the pool once, if that costs at most max_rebalance_cost_pct %.
+rebalance_on_partial: true
+max_rebalance_cost_pct: 1
+
+# Blocks to wait after a trade (testnet blocks are about 5.3 s).
+cooldown_blocks: 2
+check_interval_seconds: 10
+
+# Cost of one arb: the pool fee (0.2% of the swap) + 2 x 0.1 BZE taker fee + gas (about 300,000 gas x 0.01 ubze =
+# 0.003 BZE). An arb on 20 TUSDC (about 26 BZE) therefore needs a gap of about 0.2% + 0.8% + 0.3% = 1.3%.
+estimated_gas_bze: 0.005

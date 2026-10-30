@@ -1,0 +1,15 @@
+#########################################################
+###  Runner for the testnet pool-anchored controller  ###
+#########################################################
+# Upstream's v2_with_controllers script with one controller config. Copy this file to
+# conf/scripts/beezee_pool_anchored_pmm_runner_testnet.yml and
+# conf/controllers/beezee_pool_anchored_pmm_testnet.yml.example to conf/controllers/beezee_pool_anchored_pmm_testnet.yml,
+# then
+#   start --v2 beezee_pool_anchored_pmm_runner_testnet.yml
+# README_BZE.md, sections "Pool-anchored market making" and "AMM run guide".
+
+script_file_name: v2_with_controllers.py
+
+# Controller configs in conf/controllers/. One controller, one pair, one wallet.
+controllers_config:
+  - beezee_pool_anchored_pmm_testnet.yml

@@ -15,9 +15,13 @@ controllers_config: []
 
 exchange: beezee
 
-# BZE quoted in USDC bridged from Injective (USDC.inj): market ubze/ibc/81DA528F…, pool ibc/81DA528F…_ubze.
+# BZE quoted in USDC bridged from Injective (USDC.inj): market ubze/ibc/81DA528F…, pool ibc/81DA528F…_ubze
+# (pool fee 0.1%, to the LPs).
 # USDC.inj has no display unit on chain, so the bot counts it in base units (1 = 0.000001 USDC). One side of the
 # pair must be BZE: the fees and the gas are paid in BZE and converted with the pair's own price.
+# Pair name: the connector names USDC.inj after its current on-chain metadata (symbol ERC20:0XA00C…, no display
+# unit). That naming is not final and may change; if the pair is reported unknown, take the current name from the
+# pair autocomplete (`create`, pick a strategy with `beezee`).
 trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
 
 # Profit an arb must keep after every fee, in % of what it spends. Every book level taken must also beat the pool

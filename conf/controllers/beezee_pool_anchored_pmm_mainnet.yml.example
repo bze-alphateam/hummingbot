@@ -1,8 +1,10 @@
 #########################################################
 ###  Pool-anchored market making: BZE/USDC.inj       ###
 #########################################################
-# Copy to conf/controllers/beezee_pool_anchored_pmm.yml, set total_amount_quote, then create a
-# v2_with_controllers script config that lists it and `start --v2 <that script config>.yml`.
+# Copy to conf/controllers/beezee_pool_anchored_pmm_mainnet.yml and set total_amount_quote. Copy
+# conf/scripts/beezee_pool_anchored_pmm_runner_mainnet.yml.example (it lists this file) to
+# conf/scripts/beezee_pool_anchored_pmm_runner_mainnet.yml, then
+#   start --v2 beezee_pool_anchored_pmm_runner_mainnet.yml
 # Quotes on the BeeZee order book around the pair's liquidity pool price (not the book's own mid), never closer to
 # the pool price than the pool fee + min_spread_over_pool_fee_pct, and requotes when the pool moves more than
 # requote_threshold_pct. Optional hedge mode swaps each profitable fill back on the pool.
@@ -17,6 +19,9 @@ connector_name: beezee
 # BZE quoted in USDC bridged from Injective (USDC.inj): market ubze/ibc/81DA528F…, pool ibc/81DA528F…_ubze
 # (pool fee 0.1%). USDC.inj has no display unit on chain, so the bot counts it in base units (1 = 0.000001 USDC) and
 # the BZE price shows as about 333 instead of 0.000333.
+# Pair name: the connector names USDC.inj after its current on-chain metadata (symbol ERC20:0XA00C…, no display
+# unit). That naming is not final and may change; if the pair is reported unknown, take the current name from the
+# pair autocomplete (`create`, pick a strategy with `beezee`).
 trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
 
 # Budget for all levels together, in the quote token (here USDC.inj base units: 200000000 = 200 USDC), split between

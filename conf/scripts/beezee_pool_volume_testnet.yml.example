@@ -1,0 +1,44 @@
+#########################################################
+###  Pool volume: testnet TUSDC/BZE                   ###
+#########################################################
+# Copy to conf/scripts/beezee_pool_volume_testnet.yml, then
+#   start --v2 beezee_pool_volume_testnet.yml
+# Every cycle_seconds one round trip on the pair's pool, both legs in one tx (two MsgMultiSwap): TUSDC -> BZE -> TUSDC
+# or BZE -> TUSDC -> BZE, alternating.
+# How it works and what it costs: README_BZE.md, sections "Pool volume" and "AMM run guide".
+# Network: bzetestnet-3. In `connect beezee` pick network `testnet` with the endpoints of README_BZE.md "Testnet run"
+# and gas price 0.01 ubze (the testnet minimum; 0.001 is refused).
+
+script_file_name: beezee_pool_volume.py
+controllers_config: []
+
+exchange: beezee
+
+# TUSDC quoted in BZE: pool factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd_ubze (pool fee 0.2%). The
+# connector only sees the pools of pairs that have a market, so the TUSDC/BZE market has to exist (README_BZE.md,
+# "AMM run guide", testnet pair). Volumes and swap bounds are in BZE.
+trading_pair: "TUSDC-BZE"
+
+# 2,880 BZE a day at one cycle a minute: legs of about 1 BZE. Small on purpose: testnet funds only.
+daily_volume_quote: 2880
+cycle_seconds: 60
+
+# Bounds of one leg, in BZE.
+min_swap_amount: 0.1
+max_swap_amount: 50
+
+max_reserve_share_pct: 0.5
+
+# Balances the script never touches: TUSDC, then BZE. The wallet needs both tokens (a few TUSDC and BZE are plenty).
+reserve_base: 0
+reserve_quote: 20
+
+slippage_pct: 0.5
+safety_pct: 0.5
+
+# Cost per round trip: 2 x 0.2% pool fee on about 1 BZE + 2 x 0.1 BZE taker fee + about 0.003 BZE gas = about
+# 0.207 BZE, so about 12.4 BZE an hour. 20 BZE stops it after about 95 minutes.
+max_daily_fee_spend: 20
+
+max_price_move_pct: 2
+estimated_gas_bze: 0.005

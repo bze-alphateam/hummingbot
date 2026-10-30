@@ -31,7 +31,7 @@ FEES_BZE = TAKER_FEE + GAS
 # 08:00 UTC.
 START = 1_800_000_000.0
 NEXT_MIDNIGHT = 1_800_057_600.0
-EXAMPLE = Path(__file__).resolve().parents[5] / "conf" / "scripts" / "beezee_price_bands.yml.example"
+EXAMPLE = Path(__file__).resolve().parents[5] / "conf" / "scripts" / "beezee_price_bands_token_bze.yml.example"
 
 
 def floor_step(amount: Decimal) -> Decimal:

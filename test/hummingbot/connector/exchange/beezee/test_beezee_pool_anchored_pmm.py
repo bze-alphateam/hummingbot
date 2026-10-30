@@ -381,8 +381,10 @@ class HedgeTests(BeezeePoolAnchoredPMMTestCase):
 
 
 class ExampleTests(unittest.TestCase):
-    def test_both_examples_exist(self):
-        self.assertEqual(["beezee_pool_anchored_pmm.yml.example", "beezee_pool_anchored_pmm_token_bze.yml.example"],
+    def test_every_example_exists(self):
+        self.assertEqual(["beezee_pool_anchored_pmm_mainnet.yml.example",
+                          "beezee_pool_anchored_pmm_testnet.yml.example",
+                          "beezee_pool_anchored_pmm_token_bze.yml.example"],
                          [example.name for example in EXAMPLES])
 
     def test_every_example_loads_into_the_config(self):

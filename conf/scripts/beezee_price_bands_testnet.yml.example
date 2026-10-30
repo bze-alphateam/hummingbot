@@ -1,0 +1,54 @@
+#########################################################
+###  Price support bands: testnet TUSDC/BZE           ###
+#########################################################
+# Copy to conf/scripts/beezee_price_bands_testnet.yml, set the band around the pool price of the day, then
+#   start --v2 beezee_price_bands_testnet.yml
+# Below floor_price the script buys TUSDC with BZE, above ceiling_price it sells TUSDC for BZE, inside the band it does
+# nothing.
+# How it works and what it costs: README_BZE.md, sections "Price support bands" and "AMM run guide".
+# Network: bzetestnet-3. In `connect beezee` pick network `testnet` with the endpoints of README_BZE.md "Testnet run"
+# and gas price 0.01 ubze (the testnet minimum; 0.001 is refused).
+
+script_file_name: beezee_price_bands.py
+controllers_config: []
+
+exchange: beezee
+
+# TUSDC quoted in BZE: pool factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd_ubze (pool fee 0.2%). The
+# TUSDC/BZE market has to exist (README_BZE.md, "AMM run guide", testnet pair).
+trading_pair: "TUSDC-BZE"
+
+price_source: pool
+
+# The band, in BZE per TUSDC. The pool was at about 1.31 in October 2026: set these to about 0.3% below and above
+# the pool price `status` shows when you start. The pool holds about 178,000 TUSDC and 234,000 BZE, so moving its
+# price by m% takes a swap of about reserve x m / 200 (0.5% = about 450 TUSDC or 580 BZE), and bringing it back 0.2%
+# takes the bot about 230 BZE of buys.
+floor_price: 1.306
+ceiling_price: 1.314
+
+venue: pool
+
+# Largest buy, in BZE spent, and largest sell, in TUSDC sold.
+max_trade_quote: 50
+max_trade_base: 40
+
+# A trade's own price impact, pool fee (0.2%) included, in %.
+max_impact_pct: 1
+
+# Balances the script never spends: BZE (also covers the fees), then TUSDC.
+keep_quote_reserve: 20
+keep_base_reserve: 5
+
+# BZE all buys may spend and TUSDC all sells may sell per UTC day.
+buy_budget_quote: 400
+sell_budget_base: 300
+budget_period: daily
+
+slippage_pct: 0.5
+cooldown_blocks: 3
+check_interval_seconds: 10
+
+# Cost of one trade: the pool fee (0.2% of the input) + 0.1 BZE taker fee + gas (about 200,000 gas x 0.01 ubze =
+# 0.002 BZE).
+estimated_gas_bze: 0.005
