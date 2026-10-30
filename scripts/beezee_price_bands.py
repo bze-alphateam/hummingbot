@@ -250,12 +250,17 @@ class BeezeePriceBands(StrategyV2Base):
 
     def _venue_refusal(self) -> Optional[str]:
         config = self.config
+        checks = []
         if config.venue == POOL:
-            return venue_refusal(self.connector, self.pair, (VENUE_POOL,), "price bands with venue: pool")
+            checks.append(((VENUE_POOL,), "price bands with venue: pool"))
         if config.price_source == POOL:
-            return venue_refusal(self.connector, self.pair, (VENUE_POOL,), "price bands with price_source: pool")
-        if config.price_source == BOOK_MID:
-            return venue_refusal(self.connector, self.pair, (VENUE_BOOK,), "price bands with price_source: book_mid")
+            checks.append(((VENUE_POOL,), "price bands with price_source: pool"))
+        elif config.price_source == BOOK_MID:
+            checks.append(((VENUE_BOOK,), "price bands with price_source: book_mid"))
+        for needed, user in checks:
+            refusal = venue_refusal(self.connector, self.pair, needed, user)
+            if refusal is not None:
+                return refusal
         if not self.venues:
             return f"{self.pair} has neither a liquidity pool nor an order-book market"
         return None

@@ -454,6 +454,7 @@ class BeezeePriceBandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(self.connector.swaps))
 
     async def test_book_walk_stops_at_the_impact_cap(self):
+        self.connector.venues = ("book",)
         self.connector.pool = None
         self.connector.bids = [(Decimal("1.5"), Decimal("100")), (Decimal("1.3"), Decimal("1000"))]
         self.connector.asks = [(Decimal("1.6"), Decimal("100"))]
