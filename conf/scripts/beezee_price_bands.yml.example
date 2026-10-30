@@ -1,0 +1,67 @@
+#########################################################
+###  Price support bands: TOKEN/BZE template          ###
+#########################################################
+# A template for any token quoted in BZE. Replace the TOKEN placeholder and set the band, the caps and the budgets,
+# then copy to conf/scripts/beezee_price_bands.yml and
+#   start --v2 beezee_price_bands.yml
+# Below floor_price the script buys TOKEN with BZE, above ceiling_price it sells TOKEN for BZE, inside the band it
+# does nothing. The pair is traded in its own terms: the band and the buy budget are in BZE, the sell budget in TOKEN,
+# and nothing is routed through other pools (never BZE -> USDC).
+# How it works: README_BZE.md, section "Price support bands".
+
+script_file_name: beezee_price_bands.py
+controllers_config: []
+
+exchange: beezee
+
+# Placeholder: the pair as the connector lists it, e.g. the factory token's symbol followed by -BZE. One side of the
+# pair must be BZE: the fees and the gas are paid in BZE and counted in the pair's own terms.
+trading_pair: "TOKEN-BZE"
+
+# Reference price: "pool" (the pair's liquidity pool) or "book_mid" (the order-book mid). Leave it empty to use the
+# pool when the pair has one, the book mid otherwise.
+price_source: pool
+
+# The band, in BZE per TOKEN. Placeholders: set them around the price you want to defend. The floor must be below the
+# ceiling, or the script refuses to start.
+floor_price: 0.9
+ceiling_price: 1.2
+
+# "pool": every trade is one swap on the pair's pool. "best": the pool quote is compared with taking the book levels
+# up to the band edge, and the cheaper one (fees and gas included) takes the whole trade. Trades are never split.
+venue: pool
+
+# Largest buy, in BZE spent, and largest sell, in TOKEN sold. A trade is sized to bring the price back to the band
+# edge and never further, then cut at these.
+max_trade_quote: 500
+max_trade_base: 500
+
+# A trade's own price impact (its average price against the venue's price before it, pool fee included), in %. A
+# trade that would move the price more is cut down; most token pools charge a 0.2% fee, so keep this above it.
+max_impact_pct: 1
+
+# Balances the script never spends: the last BZE and TOKEN stay in the wallet whatever the price does. Each must be
+# at most the balance at start, or the script refuses to start. The BZE reserve also covers the fees.
+keep_quote_reserve: 1000
+keep_base_reserve: 1000
+
+# BZE all buys may spend and TOKEN all sells may sell, per budget_period. Once a side's budget is spent the script
+# stops trading that side for the period and says so in `status`.
+buy_budget_quote: 5000
+sell_budget_base: 5000
+
+# "daily": the budgets start again at UTC midnight. "total": they cover the whole run.
+budget_period: daily
+
+# A pool swap is refused by the chain rather than pay out more than this % below its quote.
+slippage_pct: 0.5
+
+# Blocks to wait after each trade so the pool and the book show it. If the price is still outside the band, the next
+# trade follows (each one capped again).
+cooldown_blocks: 3
+
+# The script checks on every new block, and at least this often (seconds).
+check_interval_seconds: 10
+
+# Gas of one trade tx in BZE, kept free on the BZE balance: about 200,000 gas x 0.01 ubze = 0.002 BZE.
+estimated_gas_bze: 0.005
