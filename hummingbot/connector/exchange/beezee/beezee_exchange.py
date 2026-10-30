@@ -991,6 +991,7 @@ class BeezeeExchange(ExchangePyBase):
             api_factory=self._web_assistants_factory,
             websocket_endpoint=self._websocket_endpoint,
             block_listener=self._on_new_block,
+            pool_price_provider=self.get_pool_price,
         )
 
     def _create_user_stream_data_source(self) -> UserStreamTrackerDataSource:

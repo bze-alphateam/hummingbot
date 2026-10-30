@@ -1,4 +1,5 @@
 import asyncio
+import math
 import unittest
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -292,10 +293,51 @@ class BeezeeOrderBookVenueTests(unittest.IsolatedAsyncioTestCase):
         snapshots = self.order_books._message_queue[self.order_books._snapshot_messages_queue_key]
         self.assertEqual(["BZE-USDC"], [snapshots.get_nowait().trading_pair for _ in range(snapshots.qsize())])
 
-    async def test_last_traded_prices_skip_the_pool_only_pair(self):
-        self.assertEqual({}, await self.order_books.get_last_traded_prices(["TUSDC-BZE"]))
+    async def test_last_traded_prices_answer_the_pool_only_pair_with_nan_without_a_pool_price(self):
+        prices = await self.order_books.get_last_traded_prices(["TUSDC-BZE"])
+        self.assertEqual(["TUSDC-BZE"], list(prices))
+        self.assertTrue(math.isnan(prices["TUSDC-BZE"]))
         self.data_source.get_last_traded_price.assert_not_called()
-        self.assertEqual({"BZE-USDC": 0.00055}, await self.order_books.get_last_traded_prices(["BZE-USDC", "TUSDC-BZE"]))
+        prices = await self.order_books.get_last_traded_prices(["BZE-USDC", "TUSDC-BZE"])
+        self.assertEqual(0.00055, prices["BZE-USDC"])
+        self.assertTrue(math.isnan(prices["TUSDC-BZE"]))
+
+    async def test_last_traded_prices_answer_the_pool_only_pair_with_its_pool_price(self):
+        pool_prices = {"TUSDC-BZE": Decimal("12.5")}
+        self.order_books._pool_price_provider = pool_prices.get
+        self.assertEqual({"BZE-USDC": 0.00055, "TUSDC-BZE": 12.5},
+                         await self.order_books.get_last_traded_prices(["BZE-USDC", "TUSDC-BZE"]))
+        self.data_source.get_last_traded_price.assert_awaited_once_with(f"ubze/{USDC}")
+
+    async def test_last_traded_prices_answer_nan_when_the_pool_price_lookup_fails(self):
+        self.order_books._pool_price_provider = Mock(side_effect=KeyError("TUSDC-BZE"))
+        prices = await self.order_books.get_last_traded_prices(["TUSDC-BZE"])
+        self.assertTrue(math.isnan(prices["TUSDC-BZE"]))
+
+    async def test_the_last_trade_price_loop_throttles_a_pool_only_pair(self):
+        # The upstream loop re-asks at once for every pair that does not come back, sleeping only when none is
+        # outdated. A pool-only pair answers without any I/O, so leaving it out spun the loop without ever yielding.
+        tracker = OrderBookTracker(data_source=self.order_books, trading_pairs=["TUSDC-BZE"])
+        await tracker._init_order_books()
+        calls: List[List[str]] = []
+        get_last_traded_prices = self.order_books.get_last_traded_prices
+        never = asyncio.Event()
+
+        async def counting_get_last_traded_prices(trading_pairs: List[str], domain: Optional[str] = None):
+            calls.append(list(trading_pairs))
+            if len(calls) > 5:
+                await never.wait()  # a spinning loop: yield so the timeout below can end the test
+            return await get_last_traded_prices(trading_pairs)
+
+        self.order_books.get_last_traded_prices = counting_get_last_traded_prices
+        try:
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(tracker._update_last_trade_prices_loop(), timeout=0.3)
+            self.assertEqual([["TUSDC-BZE"]], calls)
+            self.assertGreater(tracker.order_books["TUSDC-BZE"].last_trade_price_rest_updated, 0)
+        finally:
+            for task in tracker._tracking_tasks.values():
+                task.cancel()
 
     async def test_the_order_book_tracker_gets_ready_with_a_pool_only_pair(self):
         tracker = OrderBookTracker(data_source=self.order_books, trading_pairs=["BZE-USDC", "TUSDC-BZE"])

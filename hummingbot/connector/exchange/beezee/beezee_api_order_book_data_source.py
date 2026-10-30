@@ -20,7 +20,11 @@ if TYPE_CHECKING:
 class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
     """The order books of the traded pairs, polled on every new block. A pair with only a liquidity pool has no book:
     it gets one empty snapshot (so the tracker is ready) and is never polled. The block stream runs whatever the pairs'
-    venues, since the pool tracker refreshes on its blocks too."""
+    venues, since the pool tracker refreshes on its blocks too.
+
+    get_last_traded_prices answers every pair it is asked for: the tracker refreshes and throttles only the pairs that
+    come back, so a missing one is asked for again at once, in a loop that never yields while the answer needs no I/O.
+    A pool-only pair answers with its pool price (from `pool_price_provider`), any pair with no price with NaN."""
 
     def __init__(
         self,
@@ -29,9 +33,11 @@ class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
         api_factory: WebAssistantsFactory,
         websocket_endpoint: str,
         block_listener: Optional[Callable[[], None]] = None,
+        pool_price_provider: Optional[Callable[[str], Optional[Decimal]]] = None,
     ):
         super().__init__(trading_pairs)
         self._block_listener = block_listener
+        self._pool_price_provider = pool_price_provider
         self._data_source = data_source
         self._api_factory = api_factory
         self._websocket_endpoint = websocket_endpoint
@@ -64,16 +70,31 @@ class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
         for trading_pair in trading_pairs:
             market = await self._book_market(trading_pair)
             if market is None:
+                prices[trading_pair] = self._pool_price(trading_pair)
                 continue
-            last_price = await self._data_source.get_last_traded_price(market.market_id)
-            if last_price is not None:
-                try:
-                    normalized_price = Decimal(str(last_price))
-                    if normalized_price.is_finite() and normalized_price > Decimal("0"):
-                        prices[trading_pair] = float(normalized_price)
-                except Exception:
-                    continue
+            prices[trading_pair] = self._positive_price(await self._data_source.get_last_traded_price(market.market_id))
         return prices
+
+    def _pool_price(self, trading_pair: str) -> float:
+        if self._pool_price_provider is None:
+            return float("nan")
+        try:
+            return self._positive_price(self._pool_price_provider(trading_pair))
+        except Exception:
+            return float("nan")
+
+    @staticmethod
+    def _positive_price(price: Any) -> float:
+        """The price as a float, or NaN when there is none or it is not a positive finite number."""
+        if price is None:
+            return float("nan")
+        try:
+            normalized_price = Decimal(str(price))
+        except Exception:
+            return float("nan")
+        if normalized_price.is_finite() and normalized_price > Decimal("0"):
+            return float(normalized_price)
+        return float("nan")
 
     async def _order_book_snapshot(self, trading_pair: str) -> OrderBookMessage:
         market = await self._book_market(trading_pair)
