@@ -541,6 +541,68 @@ and a test loads them.
 - [ ] With `hedge_fills_on_pool: true`, take one of our quotes from the second wallet: exactly one hedge swap follows
       (BZE Scan shows the MsgMultiSwap), `status` counts it, and the inventory is back where it was.
 
+## Price support bands
+
+`scripts/beezee_price_bands.py` defends a price band on one pair: it buys base when the price falls below
+`floor_price`, sells base when it rises above `ceiling_price`, and does nothing inside the band. The pair is traded
+in its own terms: a TOKEN/BZE band is set in BZE, the buy budget is in BZE, the sell budget in TOKEN, and nothing is
+routed through other pools (never BZE → USDC). A pair without BZE on either side is refused at start, since the fees
+and the gas are paid in BZE.
+
+On every new block (and at least every `check_interval_seconds`):
+
+1. **Reference price.** `price_source: pool` reads the pair's pool through `BeezeePoolPriceDelegate`; `book_mid` uses
+   the order-book mid. Left empty, it is the pool when the pair has one, the book mid otherwise.
+2. **Below the floor: buy.** The input (BZE on a TOKEN/BZE pair) is the smallest of:
+   - what brings the venue's price back to the floor and no further: on the pool, the base taken out until
+     reserve_quote / reserve_base = floor, priced with `quote_input_for_output`; on the book, the asks up to the
+     floor;
+   - `max_trade_quote`;
+   - the budget left: `buy_budget_quote` less what the buys already spent in the period;
+   - the balance above `keep_quote_reserve` (less the taker fee and `estimated_gas_bze` when the quote is BZE).
+   The trade is then cut to the largest size whose own price impact is at most `max_impact_pct`: its average price
+   against the venue's price before it (the pool price, or the best ask), pool fee included. An impact cap below the
+   pool fee trades nothing.
+3. **Above the ceiling: sell.** The mirror, in base: `max_trade_base`, `sell_budget_base`, `keep_base_reserve`, bids
+   down to the ceiling. Selling TOKEN still needs BZE above `keep_quote_reserve` for the fees.
+4. **Venue.** `venue: pool` (default) sends one `amm_swap` with `slippage_pct`. `venue: best` also sizes a taker fill
+   on the book (`levels_to_take` + `fill_orders`) and sends whichever is cheaper per base, its taker fee and gas
+   included. A trade is never split across both.
+5. **Cooldown.** After a trade settles (or fails) it waits `cooldown_blocks` new blocks (`cooldown_blocks` × 10 s
+   without block notifications). If the price is still outside the band, the next trade follows, capped again. One
+   trade is in flight at a time.
+6. **Budgets.** `budget_period: daily` (default) starts both budgets again at UTC midnight; `total` covers the whole
+   run. A side whose budget is spent stops for the period and `status` says so. A failed trade spends nothing.
+7. **Sanity.** The script refuses to start when `floor_price >= ceiling_price` or a kept reserve is larger than its
+   balance. A halted pair (the pool's halted flag, or a refusal saying so) stops it, logged once; restart it once the
+   halt is lifted.
+
+`status` shows the reference price against the band, the budget used and left per side and period, the reserves
+kept, today's buys and sells with their average price, the tradebin fees, gas and pool fees, a trade in flight and the
+last skip reason (e.g. "impact cap", "buy budget spent today"). The counters live in memory: a restart starts the
+budgets from zero, so with `budget_period: total` lower the budgets by what was already spent before restarting.
+
+**Example** for a TOKEN/BZE pair whose pool sits around 1 BZE per TOKEN (pool fee 0.2%): `floor_price: 0.9`,
+`ceiling_price: 1.2`, `max_trade_quote: 500`, `max_trade_base: 500`, `max_impact_pct: 1`, `keep_quote_reserve: 1000`,
+`keep_base_reserve: 1000`, `buy_budget_quote: 5000`, `sell_budget_base: 5000`, `budget_period: daily`. Someone sells
+TOKEN and the pool drops to 0.85: the script buys TOKEN with at most 500 BZE per trade, each trade cut where its
+impact would pass 1%, one every 3 blocks until the pool is back at 0.9, at most 5000 BZE a day, and never below
+1000 BZE in the wallet. Above 1.2 it sells TOKEN the same way.
+
+**Run.** `cp conf/scripts/beezee_price_bands.yml.example hb/conf/scripts/beezee_price_bands.yml`, replace the TOKEN
+placeholder, set the band, the caps, the reserves and the budgets, fund the wallet with both tokens (plus BZE for
+fees), then `start --v2 beezee_price_bands.yml`. The example is a TOKEN/BZE template that documents every key; a test
+loads it.
+
+**Testnet.** Use a pair with BZE on one side that has a pool, and a second wallet.
+
+- [ ] Set a band around the pool price and start the script: nothing is sent while the price is inside it.
+- [ ] Push the price below the floor with a manual swap from the second wallet: the bot buys back to the floor (or
+      as far as `max_trade_quote` and the budget allow), each trade within `max_impact_pct`, one trade per
+      `cooldown_blocks`, and the BZE balance never goes below `keep_quote_reserve`.
+- [ ] Repeat above the ceiling: the bot sells back to the ceiling, never below `keep_base_reserve`.
+- [ ] With a small `buy_budget_quote`, it stops with "buy budget spent today" in `status`.
+
 ## Connector behaviour on chain v8.2.0
 
 - **Wallet modes.** `wallet` takes a hex private key. `wallet_mnemonic` takes a BIP39 mnemonic (optional passphrase)
