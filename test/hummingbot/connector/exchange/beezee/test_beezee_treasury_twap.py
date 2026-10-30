@@ -142,9 +142,10 @@ class BeezeeTreasuryTwapTests(unittest.IsolatedAsyncioTestCase):
             self._settle_last_swap()
             self._next_slice()
         self.assertEqual(12, len(self.connector.swaps))
-        # 1000 / 12 = 83.333333 per slice; the last one takes what is left.
+        # 1000 / 12 = 83.333333 per slice; each slice takes what is left over the slices left, so the rounding dust
+        # moves into the later slices and the last one closes the total.
         self.assertEqual(Decimal("83.333333"), self.connector.swaps[0][1])
-        self.assertEqual(Decimal("83.333337"), self.connector.swaps[-1][1])
+        self.assertEqual(Decimal("83.333334"), self.connector.swaps[-1][1])
         self.assertEqual(Decimal("1000"), strategy._done_base)
         self.assertEqual("completed", strategy._finished)
         self.assertIn("STOPPED: completed", strategy.format_status())
