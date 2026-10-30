@@ -1,0 +1,56 @@
+#########################################################
+###  Price support bands: BZE/USDC.inj                ###
+#########################################################
+# Copy to conf/scripts/beezee_price_bands.yml, set the band, the caps, the reserves and the budgets, then
+#   start --v2 beezee_price_bands.yml
+# Below floor_price the script buys BZE with USDC.inj, above ceiling_price it sells BZE for USDC.inj, inside the band
+# it does nothing. One pool, no route through other pools.
+# How it works and what it costs: README_BZE.md, sections "Price support bands" and "AMM run guide".
+# Network: beezee-1. In `connect beezee` pick network `mainnet` (gas price 0.01 ubze).
+
+script_file_name: beezee_price_bands.py
+controllers_config: []
+
+exchange: beezee
+
+# BZE quoted in USDC bridged from Injective (USDC.inj): market ubze/ibc/81DA528F…, pool ibc/81DA528F…_ubze
+# (pool fee 0.1%). USDC.inj has no display unit on chain, so the bot counts it in base units (1 = 0.000001 USDC):
+# the band, max_trade_quote, keep_quote_reserve and buy_budget_quote below are in those units.
+# Pair name: the connector names USDC.inj after its current on-chain metadata (symbol ERC20:0XA00C…, no display
+# unit). That naming is not final and may change; if the pair is reported unknown, take the current name from the
+# pair autocomplete (`create`, pick a strategy with `beezee`).
+trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+
+price_source: pool
+
+# The band, in USDC.inj base units per BZE: 330 = 0.00033 USDC. Placeholders: the pool was at about 365 in October
+# 2026; set them around the price you want to defend. The floor must be below the ceiling.
+floor_price: 330
+ceiling_price: 420
+
+venue: pool
+
+# Largest buy, in USDC.inj base units spent (20000000 = 20 USDC), and largest sell, in BZE sold.
+max_trade_quote: 20000000
+max_trade_base: 50000
+
+# A trade's own price impact, pool fee (0.1%) included, in %.
+max_impact_pct: 1
+
+# Balances the script never spends: USDC.inj (base units), then BZE. Hold BZE above keep_base_reserve for the fees
+# too: every trade pays 0.1 BZE taker fee + gas in BZE, also the buys.
+keep_quote_reserve: 0
+keep_base_reserve: 1000
+
+# Per UTC day: USDC.inj base units all buys may spend (100000000 = 100 USDC) and BZE all sells may sell.
+buy_budget_quote: 100000000
+sell_budget_base: 300000
+budget_period: daily
+
+slippage_pct: 0.5
+cooldown_blocks: 3
+check_interval_seconds: 10
+
+# Cost of one trade: the pool fee (0.1% of the input) + 0.1 BZE taker fee + gas (about 200,000 gas x 0.01 ubze =
+# 0.002 BZE).
+estimated_gas_bze: 0.005

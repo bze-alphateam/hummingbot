@@ -24,7 +24,7 @@ from scripts.beezee_treasury_twap import BeezeeTreasuryTwap, BeezeeTreasuryTwapC
 GAS = Decimal("0.005")
 START = 1_800_000_000.0
 INTERVAL = 300
-EXAMPLE = Path(__file__).resolve().parents[5] / "conf" / "scripts" / "beezee_treasury_twap.yml.example"
+EXAMPLE = Path(__file__).resolve().parents[5] / "conf" / "scripts" / "beezee_treasury_twap_token_bze.yml.example"
 
 
 class BeezeeTreasuryTwapTests(unittest.IsolatedAsyncioTestCase):

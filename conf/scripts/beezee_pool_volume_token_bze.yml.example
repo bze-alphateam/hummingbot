@@ -1,0 +1,46 @@
+#########################################################
+###  Pool volume: TOKEN/BZE template                  ###
+#########################################################
+# A template for any token quoted in BZE that has a liquidity pool against BZE (and a market: the connector only sees
+# the pools of pairs it lists). Replace the TOKEN placeholder, set the volume and the fee cap, then copy to
+# conf/scripts/beezee_pool_volume.yml and
+#   start --v2 beezee_pool_volume.yml
+# The pair is traded in its own terms on its own pool: volumes, bounds and fees in BZE, never routed BZE -> USDC.
+# How it works and what it costs: README_BZE.md, sections "Pool volume" and "AMM run guide".
+# Network: beezee-1. In `connect beezee` pick network `mainnet` (gas price 0.01 ubze).
+
+script_file_name: beezee_pool_volume.py
+controllers_config: []
+
+exchange: beezee
+
+# Placeholder: the pair as the connector lists it, e.g. the factory token's symbol followed by -BZE.
+trading_pair: "TOKEN-BZE"
+
+# Volume to print per UTC day, in BZE. Both legs of a round trip count. Placeholder: set your own target.
+daily_volume_quote: 50000
+
+# One round trip per cycle. 900 s = 96 cycles a day, legs of about 260 BZE here.
+cycle_seconds: 900
+
+# Bounds of one leg, in BZE.
+min_swap_amount: 10
+max_swap_amount: 2000
+
+max_reserve_share_pct: 0.5
+
+# Balances the script never touches: TOKEN, then BZE. The wallet needs both tokens plus BZE for the fees.
+reserve_base: 0
+reserve_quote: 100
+
+slippage_pct: 0.5
+safety_pct: 0.5
+
+# Pool fees + tradebin taker fees + gas per UTC day, in BZE. Most token pools charge 0.2%: 50,000 BZE of volume pays
+# about 100 BZE of pool fees (to the LPs) + 96 x 0.205 BZE of taker fees and gas = about 120 BZE.
+max_daily_fee_spend: 150
+
+max_price_move_pct: 2
+
+# Gas of one round-trip tx in BZE: about 300,000 gas x 0.01 ubze = 0.003 BZE.
+estimated_gas_bze: 0.005

@@ -1,0 +1,15 @@
+#########################################################
+###  Runner for the mainnet pool-anchored controller  ###
+#########################################################
+# Upstream's v2_with_controllers script with one controller config. Copy this file to
+# conf/scripts/beezee_pool_anchored_pmm_runner_mainnet.yml and
+# conf/controllers/beezee_pool_anchored_pmm_mainnet.yml.example to conf/controllers/beezee_pool_anchored_pmm_mainnet.yml
+# (or a TOKEN/BZE copy of beezee_pool_anchored_pmm_token_bze.yml.example, listed below under its own name), then
+#   start --v2 beezee_pool_anchored_pmm_runner_mainnet.yml
+# README_BZE.md, sections "Pool-anchored market making" and "AMM run guide".
+
+script_file_name: v2_with_controllers.py
+
+# Controller configs in conf/controllers/. One controller, one pair, one wallet.
+controllers_config:
+  - beezee_pool_anchored_pmm_mainnet.yml

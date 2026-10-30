@@ -1,0 +1,41 @@
+#########################################################
+###  Pool <-> order-book arbitrage: TOKEN/BZE template ###
+#########################################################
+# A template for any token quoted in BZE that has both a market and a liquidity pool against BZE. Replace the TOKEN
+# placeholder, set the sizes and reserves, then copy to conf/scripts/beezee_pool_book_arb.yml and
+#   start --v2 beezee_pool_book_arb.yml
+# The pair is traded in its own terms: its pool against its own book, prices, sizes and fees in BZE, nothing routed
+# through other pools (never BZE -> USDC).
+# How it works and what it costs: README_BZE.md, sections "Pool / order-book arbitrage" and "AMM run guide".
+# Network: beezee-1. In `connect beezee` pick network `mainnet` (gas price 0.01 ubze).
+
+script_file_name: beezee_pool_book_arb.py
+controllers_config: []
+
+exchange: beezee
+
+# Placeholder: the pair as the connector lists it, e.g. the factory token's symbol followed by -BZE. Run `create`,
+# pick a strategy with `beezee` and look at the trading pair autocomplete for the exact name.
+trading_pair: "TOKEN-BZE"
+
+# Profit an arb must keep after every fee, in % of what it spends. Most token pools charge a 0.2% fee, which the
+# pool quote already includes.
+min_profit_pct: 0.5
+
+# Largest arb, in TOKEN. Placeholder: size it to your inventory.
+max_trade_base: 1000
+
+# Balances the script never touches: TOKEN, then BZE. Both legs spend what the wallet holds, so keep both tokens
+# above these, plus BZE for the fees (2 x 0.1 BZE taker fee + gas per arb).
+reserve_base: 0
+reserve_quote: 100
+
+slippage_pct: 0.5
+rebalance_on_partial: true
+max_rebalance_cost_pct: 1
+cooldown_blocks: 2
+check_interval_seconds: 10
+
+# Gas of one fill + swap tx in BZE: about 300,000 gas x 0.01 ubze = 0.003 BZE. With the 2 x 0.1 BZE taker fees an arb
+# costs about 0.205 BZE whatever its size, plus the pool fee on the swap.
+estimated_gas_bze: 0.005

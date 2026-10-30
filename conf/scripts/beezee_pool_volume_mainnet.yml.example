@@ -18,6 +18,9 @@ exchange: beezee
 # The chain's metadata gives USDC.inj no display unit, so the bot counts it in base units (1 = 0.000001 USDC).
 # Volumes and swap bounds below are in the same units. One side of the pair must be BZE: the fees and the gas are
 # paid in BZE and converted with the pair's own price.
+# Pair name: the connector names USDC.inj after its current on-chain metadata (symbol ERC20:0XA00C…, no display
+# unit). That naming is not final and may change; if the pair is reported unknown, take the current name from the
+# pair autocomplete (`create`, pick a strategy with `beezee`).
 trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
 
 # Volume to print per UTC day, in USDC.inj base units: 20000000 = 20 USDC. Both legs of a round trip count.

@@ -35,7 +35,7 @@ FEES_BZE = 2 * TAKER_FEE + GAS
 # 08:00 UTC: 57,600 s, i.e. 192 cycles of 300 s, left in the day.
 START = 1_800_000_000.0
 NEXT_MIDNIGHT = 1_800_057_600.0
-EXAMPLE = Path(__file__).resolve().parents[5] / "conf" / "scripts" / "beezee_pool_volume.yml.example"
+EXAMPLE = Path(__file__).resolve().parents[5] / "conf" / "scripts" / "beezee_pool_volume_mainnet.yml.example"
 
 
 def floor_step(amount: Decimal) -> Decimal:

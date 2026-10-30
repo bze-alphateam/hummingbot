@@ -19,7 +19,7 @@ Our changes stay in a few places, so syncing upstream stays a clean merge:
 
 - `hummingbot/connector/exchange/beezee/` and `test/hummingbot/connector/exchange/beezee/`
 - `scripts/beezee_*` and `controllers/**/beezee_*`
-- `conf/strategies/beezee_*.yml.example`
+- `conf/strategies/beezee_*.yml.example`, `conf/scripts/beezee_*.yml.example`, `conf/controllers/beezee_*.yml.example`
 - `README_BZE.md` and `.github/workflows/bze-*.yml`
 - small edits to upstream files: dependencies (`setup.py`, `setup/environment.yml`) and a repository guard on
   upstream's Docker Hub workflow so it never runs in this fork
@@ -394,10 +394,10 @@ arb, the day's trades, profit in quote (the quote made plus the base made at the
 gas), tradebin fees, gas and pool fees, the open imbalance with each one's state, an arb in flight and the last skip
 reason. The counters live in memory: a restart starts them from zero and forgets open imbalances.
 
-**Run.** `cp conf/scripts/beezee_pool_book_arb.yml.example hb/conf/scripts/beezee_pool_book_arb.yml`, set
+**Run.** `cp conf/scripts/beezee_pool_book_arb_mainnet.yml.example hb/conf/scripts/beezee_pool_book_arb.yml`, set
 `max_trade_base` and the reserves, fund the wallet with both tokens (plus BZE for fees), then
-`start --v2 beezee_pool_book_arb.yml`. The example is for BZE/USDC.inj on mainnet and documents every key; a test
-loads it.
+`start --v2 beezee_pool_book_arb.yml`. The `_mainnet` example is for BZE/USDC.inj, `_token_bze` is a TOKEN/BZE
+template and `_testnet` runs on testnet TUSDC/BZE (see "AMM run guide"). Each documents every key; a test loads them.
 
 **Testnet.** Use a pair with BZE on one side that has both a market and a pool, and a second wallet.
 
@@ -458,10 +458,10 @@ also an LP in that pool gets their share of the pool fee back. Example on BZE/US
 | gas: 96 × 0.005 BZE | 0.48 BZE |
 | total | about 80 BZE, i.e. about 4 BZE per USDC of volume |
 
-**Run.** `cp conf/scripts/beezee_pool_volume.yml.example hb/conf/scripts/beezee_pool_volume.yml`, set
+**Run.** `cp conf/scripts/beezee_pool_volume_mainnet.yml.example hb/conf/scripts/beezee_pool_volume.yml`, set
 `daily_volume_quote` and `max_daily_fee_spend`, fund the wallet with both tokens (plus BZE for fees), then
-`start --v2 beezee_pool_volume.yml`. The example is for BZE/USDC.inj on mainnet and documents every key; a test
-loads it.
+`start --v2 beezee_pool_volume.yml`. The `_mainnet` example is for BZE/USDC.inj, `_token_bze` is a TOKEN/BZE template
+and `_testnet` runs on testnet TUSDC/BZE (see "AMM run guide"). Each documents every key; a test loads them.
 
 **Testnet.** Use a pair with BZE on one side that has a pool.
 
@@ -527,11 +527,14 @@ nothing else may close a hedged fill on the book, and a level waits `cooldown_ti
   less than the 0.1% margin, so this swap is not sent and the 30,000 BZE sale stays in the inventory. On that pool
   hedge 5,000 BZE fills (impact about 0.07%): net ≈ 0.5 − 0.1 − 0.07 ≈ 0.33% of the fill, about 0.0055 USDC each.
 
-**Run.** Copy `conf/controllers/beezee_pool_anchored_pmm.yml.example` (BZE/USDC.inj, mainnet) or
-`beezee_pool_anchored_pmm_token_bze.yml.example` (a TOKEN/BZE template, replace the placeholders) to
-`conf/controllers/<name>.yml` and set `total_amount_quote`. Then `create --script-config v2_with_controllers`, list
-`<name>.yml` under `controllers_config`, and `start --v2 <that script config>.yml`. Both examples document every key
-and a test loads them.
+**Run.** Copy `conf/controllers/beezee_pool_anchored_pmm_mainnet.yml.example` (BZE/USDC.inj),
+`beezee_pool_anchored_pmm_token_bze.yml.example` (a TOKEN/BZE template, replace the placeholders) or
+`beezee_pool_anchored_pmm_testnet.yml.example` (testnet TUSDC/BZE) to `conf/controllers/<name>.yml` and set
+`total_amount_quote`. A controller runs inside upstream's `v2_with_controllers` script:
+`conf/scripts/beezee_pool_anchored_pmm_runner_{mainnet,testnet}.yml.example` are ready script configs that list the
+mainnet / testnet controller (for a TOKEN/BZE copy, change the name under `controllers_config`). Copy the runner to
+`conf/scripts/` without `.example` and `start --v2 beezee_pool_anchored_pmm_runner_mainnet.yml`. Every example
+documents every key and a test loads them.
 
 **Testnet.** Use a pair that has both a market and a pool, and a second wallet.
 
@@ -589,10 +592,11 @@ TOKEN and the pool drops to 0.85: the script buys TOKEN with at most 500 BZE per
 impact would pass 1%, one every 3 blocks until the pool is back at 0.9, at most 5000 BZE a day, and never below
 1000 BZE in the wallet. Above 1.2 it sells TOKEN the same way.
 
-**Run.** `cp conf/scripts/beezee_price_bands.yml.example hb/conf/scripts/beezee_price_bands.yml`, replace the TOKEN
-placeholder, set the band, the caps, the reserves and the budgets, fund the wallet with both tokens (plus BZE for
-fees), then `start --v2 beezee_price_bands.yml`. The example is a TOKEN/BZE template that documents every key; a test
-loads it.
+**Run.** `cp conf/scripts/beezee_price_bands_token_bze.yml.example hb/conf/scripts/beezee_price_bands.yml`, replace
+the TOKEN placeholder, set the band, the caps, the reserves and the budgets, fund the wallet with both tokens (plus BZE
+for fees), then `start --v2 beezee_price_bands.yml`. `_token_bze` is a TOKEN/BZE template, `_mainnet` is for
+BZE/USDC.inj and `_testnet` runs on testnet TUSDC/BZE (see "AMM run guide"). Each documents every key; a test loads
+them.
 
 **Testnet.** Use a pair with BZE on one side that has a pool, and a second wallet.
 
@@ -651,10 +655,11 @@ wherever it is cheaper, never above 1.2 BZE, never moving the price more than 0.
 `limit_price: 0.8`, `catch_up: false`. A slice whose impact would pass 0.5% is cut; below 0.8 BZE nothing is sold;
 with `catch_up: false` what was not sold is reported at the end instead of being pushed into later slices.
 
-**Run.** `cp conf/scripts/beezee_treasury_twap.yml.example hb/conf/scripts/beezee_treasury_twap.yml`, replace the TOKEN
-placeholder, set the side, the amount, the period, the caps and the reserves, fund the wallet (plus BZE for fees),
-then `start --v2 beezee_treasury_twap.yml`. The example is a TOKEN/BZE template that documents every key; a test loads
-it.
+**Run.** `cp conf/scripts/beezee_treasury_twap_token_bze.yml.example hb/conf/scripts/beezee_treasury_twap.yml`,
+replace the TOKEN placeholder, set the side, the amount, the period, the caps and the reserves, fund the wallet (plus
+BZE for fees), then `start --v2 beezee_treasury_twap.yml`. `_token_bze` is a TOKEN/BZE template, `_mainnet` is for
+BZE/USDC.inj and `_testnet` runs on testnet TUSDC/BZE (see "AMM run guide"). Each documents every key; a test loads
+them.
 
 **Testnet.** Use a pair with BZE on one side that has both a pool and a book, and a second wallet.
 
@@ -663,6 +668,143 @@ it.
 - [ ] Move the book against the pool with the second wallet (a bid above the pool price, then none): the slices
       alternate venues as the prices differ.
 - [ ] At the end, the summary (done, average price, fees) matches the trades in BZE Scan.
+
+## AMM run guide
+
+How to run the pool scripts and the pool-anchored controller above. Every one has three ready configs:
+
+| Goal | Script / controller | Testnet (TUSDC/BZE) | Mainnet (BZE/USDC.inj) | Template (TOKEN/BZE) |
+|---|---|---|---|---|
+| Keep the pool and the book in line | `scripts/beezee_pool_book_arb.py` | `conf/scripts/beezee_pool_book_arb_testnet.yml.example` | `…_mainnet.yml.example` | `…_token_bze.yml.example` |
+| Quote on the book | `controllers/market_making/beezee_pool_anchored_pmm.py` | `conf/controllers/beezee_pool_anchored_pmm_testnet.yml.example` + `conf/scripts/beezee_pool_anchored_pmm_runner_testnet.yml.example` | `…_mainnet.yml.example` + `…_runner_mainnet.yml.example` | `…_token_bze.yml.example` |
+| Volume on the pool | `scripts/beezee_pool_volume.py` | `conf/scripts/beezee_pool_volume_testnet.yml.example` | `…_mainnet.yml.example` | `…_token_bze.yml.example` |
+| Price support | `scripts/beezee_price_bands.py` | `conf/scripts/beezee_price_bands_testnet.yml.example` | `…_mainnet.yml.example` | `…_token_bze.yml.example` |
+| Treasury buyback / sell-down | `scripts/beezee_treasury_twap.py` | `conf/scripts/beezee_treasury_twap_testnet.yml.example` | `…_mainnet.yml.example` | `…_token_bze.yml.example` |
+
+Each config says what to set and what one trade costs. TOKEN/BZE templates price, size and budget in BZE and never
+route through USDC. Copy a config to `hb/conf/scripts/` (or `hb/conf/controllers/`) without `.example`, then
+`start --v2 <file>.yml`; the controller starts through its runner.
+
+### Which script for which goal
+
+- **The pool and the book drift apart** (the book sells below the pool or buys above it): pool / order-book
+  arbitrage. It takes the gap in one tx and holds nothing afterwards.
+- **You want resting quotes on the book**: pool-anchored market making. It quotes around the pool price, which on most
+  BZE pairs is deeper and harder to push than the book's own mid. With hedge mode it keeps the inventory flat.
+- **You want volume**: pool volume prints it on the pool with round trips (cost: pool fee + 2 taker fees + gas per
+  round trip). To print it on the order book instead, see "Volume target" (cost: 2 maker fees + gas per cycle).
+- **You want to defend a price range**: price support bands. It buys below the floor and sells above the ceiling,
+  within daily or total budgets.
+- **A treasury buys back or sells down** a set amount over hours or days: treasury TWAP, one capped slice at a time on
+  the cheaper venue.
+
+### Picking a pool and reading it against the book
+
+- **The pair needs a market.** The connector lists pairs from the order-book markets and only reads the pools of
+  those pairs (pool id = the two denoms sorted, joined by `_`). A pool whose pair has no market is invisible to the
+  bot: create the market first (`bzed tx tradebin create-market <base> <quote>`, fee 25,000 BZE on mainnet and
+  testnet), then restart the client so it lists the new pair.
+- **BZE on one side.** Every AMM script pays the fees and the gas in BZE, so the arbitrage, pool volume, bands and
+  TWAP scripts refuse a pair without BZE, and hedge mode needs it too.
+- **Fee and depth.** `/bze/tradebin/all_liquidity_pools` on a REST endpoint lists every pool with its `fee` and
+  reserves (in base units). The USDC pools charge 0.1%, most token pools 0.2–0.3%. On a constant-product pool a swap of
+  `x` against a reserve `R` costs about `x / R` of price impact on top of the fee and moves the pool price about
+  `2 × x / R`: keep trades to a small share of the reserve (`max_reserve_share_pct`, `max_impact_pct`).
+- **Pool price against the book.** Every script's `status` shows the pool price in the pair's own terms (quote per
+  base, the same units as the book), next to the best bid and ask where it uses the book. A pool price between the
+  best bid and ask is normal. A best ask below the pool price, or a best bid above it, by more than the pool fee plus
+  the fixed fees (2 × 0.1 BZE + gas, as a share of the trade) is an arbitrage the arb script takes. Quotes closer to
+  the pool price than its fee can be arbitraged against you: the pool-anchored controller never places them.
+
+### Funding a wallet and keeping reserves
+
+- **One wallet per bot**, holding only what that bot may trade (see below). Fund it with both tokens of the pair, plus
+  BZE for the fees.
+- **What BZE pays for.** Gas on every tx (about 0.002–0.003 BZE at the 0.01 ubze minimum gas price, on mainnet and
+  testnet), the 0.1 BZE tradebin taker fee for every swap message and every fill message (also a fill that matches
+  nothing), and the 0.001 BZE maker fee for every order placed. A buy that spends the other token still pays its fees in
+  BZE.
+- **Reserves.** Each script keeps a floor it never spends: `reserve_base` / `reserve_quote` (arbitrage, pool volume),
+  `keep_base_reserve` / `keep_quote_reserve` (bands, TWAP). On the BZE side the fees come out of the part above the
+  reserve. The bands and TWAP scripts refuse to start when a reserve is larger than the balance. The controller has no
+  reserve key: its `total_amount_quote` is the most it quotes, so fund the wallet with that plus the fees.
+- **Testnet.** Fund a throwaway wallet with testnet BZE and swap part of it into TUSDC in testnet-dex (see
+  "Testnet pair" below).
+
+### One wallet per bot
+
+Don't run two scripts or controllers on one wallet. They would share one balance (each script's reserves and budgets
+assume nothing else spends it), one account sequence (two clients signing at once refuse each other's txs with
+sequence mismatches), and one set of open orders (after a restart a bot adopts every open order on its pair, the other
+bot's included; the arb script would take the controller's own quotes). Give every bot its own wallet, as
+`hummingbot-deploy` does: one service = one market = one wallet.
+
+### Stopping safely
+
+- **Wait for the in-flight trade.** `status` shows a swap, arb, hedge or slice in flight. `stop` while nothing is in
+  flight. A stop (or kill) during a broadcast leaves that swap FAILED after the restart, even though its tx may still
+  land: check the wallet's last txs in the explorer before trusting the counters. The balances are read from the
+  chain, so they are right either way.
+- **Resting orders.** Only the controller rests orders; `stop` cancels them. Afterwards check in the dex app that the
+  wallet has no order left on the book, and cancel any leftover there. The scripts hold no resting orders: swaps settle
+  in their tx and taker fills are refunded at the end of their block.
+- **Restart.** The scripts and the controller keep their counters in memory only, so a restart starts them from zero:
+
+  | Script / controller | Forgotten on restart | Do before restarting |
+  |---|---|---|
+  | Arbitrage | open imbalances, the day's trades and profit | rebalance a kept imbalance by hand if you want it gone |
+  | Pool-anchored MM | hedge counters, the fills seen, unhedged fills | after the first requote, check the book holds one set of quotes |
+  | Pool volume | the day's volume and fee spend | lower `daily_volume_quote` / `max_daily_fee_spend` by what was done today |
+  | Bands | budget spent | with `budget_period: total`, lower the budgets by what was spent |
+  | TWAP | amount done, slices, reference TWAP | lower `total_amount` (and `duration_hours`) by what was done |
+
+  A `docker kill` keeps the controller's orders on the book and the restart adopts them (see "Restart with open
+  orders"); `stop` cancels them first.
+
+### Known behaviour
+
+- **Testnet gas.** The testnet minimum gas price is 0.01 ubze, like mainnet; 0.001 is refused as insufficient fees.
+- **Crossing an order by hand.** A crossing order must be priced exactly at the best price on the other side: the
+  chain refuses a buy above the best ask (or a sell below the best bid) with "A better price is available". Price test
+  orders that should cross at the best level itself.
+- **Inventory skew in pure market making.** Upstream `pure_market_making` with `inventory_skew_enabled` stops placing
+  bids once the wallet holds about 86% base. Fund the wallet near the target split before expecting a two-sided book. The pool-anchored controller has no inventory skew.
+- **One-sided market making on a thin book walks its own price.** A book-mid strategy that quotes on one side only
+  counts its own orders in the mid, so each refresh moves its reference toward them. Seed both sides, or anchor to the
+  pool with the pool-anchored controller.
+- **A fill that matches nothing still pays the 0.1 BZE taker fee**, but no trade carries it: the balances are right
+  (read from the chain), while the PnL and the trade history miss that fee.
+- **Arbitrage.** Its state (an arb in flight, open imbalances, the counters) is in memory only. When it buys on the pool
+  and sells into bids, the swap may deliver up to `slippage_pct` less base than the fill sold; that drift is not
+  recorded as an imbalance, it only shows in the balances.
+- **Pool-anchored MM.** A halt is seen only through the pool's `halted` flag. On a pair without a pool the connector
+  still refuses orders on a halted denom, but the controller keeps trying.
+- **Pool volume.** A halted pool pauses the script and it resumes by itself once the halt is lifted. If a round trip's
+  completion is ever missed, the next ones wait behind it until a restart.
+- **Bands and TWAP.** A halt stops them; restart once it is lifted.
+- **TWAP.** With `catch_up: false`, a part the book refunded still stays in what is left and is traded later. Once
+  nothing is left, the remaining slices log a "nothing left" skip until the deadline.
+- **USDC.inj pair name.** On mainnet the connector names USDC.inj after its on-chain metadata, so BZE/USDC.inj lists as
+  `BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A` with USDC in base units (see "Pure market making examples").
+  The mainnet configs use that name. It is not final and may change with the metadata; then take the new name from the
+  pair autocomplete.
+
+### Testnet pair
+
+Testnet (`bzetestnet-3`, October 2026) has one order-book market, `ULMN-TUSDC`, which has no pool and no BZE side, so
+none of the AMM scripts can use it. The pools with BZE are TUSDC/BZE (`factory/…/testusd_ubze`, fee 0.2%, about 1.31
+BZE per TUSDC), ULMN/BZE (fee 0.1%) and VDL/BZE (fee 0.3%). The testnet configs use **TUSDC/BZE**, whose market has
+to be created once (25,000 testnet BZE, paid by the creating wallet):
+
+```bash
+bzed tx tradebin create-market factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd ubze \
+  --from <test wallet> --keyring-backend test --chain-id bzetestnet-3 \
+  --node https://testnet-rpc.getbze.com:443 --gas 300000 --fees 3000ubze
+```
+
+Then restart the client: the connector lists the market as `TUSDC-BZE` (check it in the pair autocomplete; the
+testnet configs use that name). Check that `/bze/tradebin/all_markets` on `https://testnet.getbze.com` shows it first;
+once it exists, skip this step. The run itself follows "Testnet run" with the config of the script.
 
 ## Connector behaviour on chain v8.2.0
 

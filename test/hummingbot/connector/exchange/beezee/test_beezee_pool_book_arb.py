@@ -36,7 +36,7 @@ GAS = Decimal("0.005")
 # Two taker fees + the gas estimate, in BZE.
 FIXED_BZE = 2 * TAKER_FEE + GAS
 START = 1_800_000_000.0
-EXAMPLE = Path(__file__).resolve().parents[5] / "conf" / "scripts" / "beezee_pool_book_arb.yml.example"
+EXAMPLE = Path(__file__).resolve().parents[5] / "conf" / "scripts" / "beezee_pool_book_arb_mainnet.yml.example"
 
 
 @dataclass
