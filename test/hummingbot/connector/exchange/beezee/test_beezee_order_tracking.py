@@ -178,6 +178,10 @@ class BeezeeChainTestCase(unittest.IsolatedAsyncioTestCase):
             task.cancel()
         self.assertEqual([], [task.get_coro() for task in leftover])
 
+    def _liquidity_pools(self) -> List[Dict[str, Any]]:
+        """The pools `all_liquidity_pools` lists: none here."""
+        return []
+
     def _mock_chain_state(self):
         api = self.mock_api
         api.get(re.compile(rf"^{re.escape(REST_URL + CONSTANTS.TRADING_PAIRS_PATH_URL)}(\?.*)?$"), repeat=True, payload={
@@ -188,6 +192,11 @@ class BeezeeChainTestCase(unittest.IsolatedAsyncioTestCase):
                 f"{REST_URL}{CONSTANTS.DENOM_METADATA_PATH_URL}/{denom.replace('/', '%2F')}",
                 repeat=True, payload={"metadata": metadata},
             )
+        # The pairs come from the pools too. The first matching mock answers, so a subclass changes the pools through
+        # _liquidity_pools rather than by registering the URL again.
+        api.get(re.compile(rf"^{re.escape(REST_URL + CONSTANTS.ALL_LIQUIDITY_POOLS_PATH_URL)}(\?.*)?$"), repeat=True, payload={
+            "list": self._liquidity_pools(), "pagination": {"next_key": None},
+        })
         api.get(f"{REST_URL}{CONSTANTS.TRADEBIN_PARAMS_PATH_URL}", repeat=True, payload={"params": {
             "marketMakerFee": {"denom": "ubze", "amount": "1000"},
             "marketTakerFee": {"denom": "ubze", "amount": "100000"},

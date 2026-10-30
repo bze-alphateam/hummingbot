@@ -64,6 +64,10 @@ class FakeConnector:
         self.swap_error: Optional[Exception] = None
         self.swap_results: Dict[str, object] = {}
         self.in_flight_orders: Dict[str, object] = {}
+        self.venues: Tuple[str, ...] = ("book", "pool")
+
+    def trading_pair_venues(self, trading_pair: str) -> Tuple[str, ...]:
+        return self.venues
 
     def get_pool(self, trading_pair: str) -> Optional[BeezeePool]:
         return self.pool
@@ -164,6 +168,7 @@ class QuoteTests(BeezeePoolAnchoredPMMTestCase):
         self.assertEqual(Decimal("25") / price, amount)
 
     async def test_without_a_pool_the_book_mid_is_used_with_a_warning(self):
+        self.connector.venues = ("book",)
         self.connector.pool = None
         self.book_mid = Decimal("0.0004")
         self.make()
@@ -184,6 +189,29 @@ class QuoteTests(BeezeePoolAnchoredPMMTestCase):
         await self.tick()
         self.assertEqual(BOOK_MID, self.controller.processed_data["price_source"])
         self.assertIn("is empty", self.logged("warning")[0])
+
+    async def test_a_pair_without_an_order_book_market_is_refused_once(self):
+        self.connector.venues = ("pool",)
+        self.make()
+        self.assertEqual([], await self.tick())
+        self.assertEqual([], await self.tick())
+
+        self.assertIsNone(self.controller.processed_data["reference_price"])
+        reason = (f"{PAIR} has no order-book market (venues: pool only); pool-anchored PMM needs an order-book "
+                  f"market")
+        self.assertEqual([f"Pool-anchored PMM refuses to start: {reason}."], self.logged("error"))
+        self.assertEqual([f"Pool-anchored PMM {PAIR}", f"  Refused: {reason}"], self.controller.to_format_status())
+        self.assertEqual(reason, self.controller.get_custom_info()["refused"])
+
+    async def test_it_waits_while_the_venues_are_not_loaded(self):
+        self.connector.venues = ()
+        self.make()
+        self.assertEqual([], await self.tick())
+        self.assertEqual([], self.logged("error"))
+        self.connector.venues = ("book", "pool")
+        actions = await self.tick()
+        self.assertEqual(4, len([action for action in actions if isinstance(action, CreateExecutorAction)]))
+        self.assertIn("venues: order book + pool", self.controller.to_format_status()[0])
 
     async def test_no_pool_and_no_book_mid_quotes_nothing(self):
         self.connector.pool = None

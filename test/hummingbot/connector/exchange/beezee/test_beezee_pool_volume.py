@@ -67,11 +67,16 @@ class FakePoolConnector(ConnectorBase):
         self.sent_ids: List[List[str]] = []
         self.swap_results: Dict[str, BeezeeSwapResult] = {}
         self.swap_error: Optional[Exception] = None
+        # A pool with no order-book market by default: the script needs only the pool.
+        self.venues: Tuple[str, ...] = ("pool",)
         self._next_id = 0
 
     @property
     def name(self) -> str:
         return "beezee"
+
+    def trading_pair_venues(self, trading_pair: str) -> Tuple[str, ...]:
+        return self.venues
 
     @property
     def ready(self) -> bool:
@@ -411,6 +416,34 @@ class BeezeePoolVolumeTests(unittest.IsolatedAsyncioTestCase):
         strategy = self._strategy()
         self._run(2)
         self.assertEqual("TOKEN-BZE has no liquidity pool", strategy._last_skip_reason)
+
+    async def test_it_runs_on_a_pool_with_or_without_an_order_book_market(self):
+        for venues in (("pool",), ("book", "pool")):
+            self.connector = FakePoolConnector("TOKEN", "BZE")
+            self.connector.venues = venues
+            strategy = self._strategy()
+            self._run(2)
+            self.assertIsNone(strategy._refused)
+            self.assertEqual(1, len(self.connector.sent))
+        self.assertIn("venues: order book + pool", strategy.format_status())
+
+    async def test_status_shows_a_pool_only_pair(self):
+        strategy = self._strategy()
+        self._run(2)
+        self.assertIn("venues: pool only", strategy.format_status())
+
+    async def test_a_pair_without_a_pool_is_refused_once_naming_the_pool(self):
+        self.connector.venues = ("book",)
+        strategy = self._strategy()
+        with patch.object(strategy, "log_with_clock") as log:
+            self._run(2)
+            self._run(120)
+        self.assertEqual([], self.connector.sent)
+        self.assertEqual(1, sum("refuses to start" in str(call) for call in log.call_args_list))
+        self.assertIn(
+            "Refused: TOKEN-BZE has no liquidity pool (venues: order book only); pool volume needs a liquidity pool",
+            strategy.format_status(),
+        )
 
     async def test_a_pair_without_bze_is_refused(self):
         self.connector = FakePoolConnector("TOKEN", "USDC")

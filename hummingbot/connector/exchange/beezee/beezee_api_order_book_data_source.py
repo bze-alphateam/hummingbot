@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
 from hummingbot.connector.exchange.beezee.beezee_order_book import BeezeeOrderBook
+from hummingbot.connector.exchange.beezee.beezee_utils import BeezeeMarket, BeezeeVenueError
 from hummingbot.core.data_type.order_book_message import OrderBookMessage
 from hummingbot.core.data_type.order_book_tracker_data_source import OrderBookTrackerDataSource
 from hummingbot.core.web_assistant.connections.data_types import WSJSONRequest
@@ -17,6 +18,10 @@ if TYPE_CHECKING:
 
 
 class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
+    """The order books of the traded pairs, polled on every new block. A pair with only a liquidity pool has no book:
+    it gets one empty snapshot (so the tracker is ready) and is never polled. The block stream runs whatever the pairs'
+    venues, since the pool tracker refreshes on its blocks too."""
+
     def __init__(
         self,
         trading_pairs: List[str],
@@ -47,10 +52,19 @@ class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
 
         self._chain_levels[trading_pair] = {"bids": levels("bids", True), "asks": levels("asks", False)}
 
+    async def _book_market(self, trading_pair: str) -> Optional[BeezeeMarket]:
+        """The pair's order-book market, or None for a pair with only a liquidity pool. An unknown pair raises."""
+        try:
+            return await self._data_source.get_market_by_trading_pair(trading_pair)
+        except BeezeeVenueError:
+            return None
+
     async def get_last_traded_prices(self, trading_pairs: List[str], domain: Optional[str] = None) -> Dict[str, float]:
         prices: Dict[str, float] = {}
         for trading_pair in trading_pairs:
-            market = await self._data_source.get_market_by_trading_pair(trading_pair)
+            market = await self._book_market(trading_pair)
+            if market is None:
+                continue
             last_price = await self._data_source.get_last_traded_price(market.market_id)
             if last_price is not None:
                 try:
@@ -62,7 +76,9 @@ class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
         return prices
 
     async def _order_book_snapshot(self, trading_pair: str) -> OrderBookMessage:
-        market = await self._data_source.get_market_by_trading_pair(trading_pair)
+        market = await self._book_market(trading_pair)
+        if market is None:
+            return BeezeeOrderBook.snapshot_message_from_exchange(trading_pair, None, [], [], int(time.time() * 1e6), time.time())
         order_book = await self._data_source.get_order_book(market.market_id)
         self._remember_levels(trading_pair, order_book)
         update_id = int(time.time() * 1e6)
@@ -101,7 +117,9 @@ class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
     async def _poll_and_publish(self):
         update_id = int(time.time() * 1e6)
         for trading_pair in list(self._trading_pairs):
-            market = await self._data_source.get_market_by_trading_pair(trading_pair)
+            market = await self._book_market(trading_pair)
+            if market is None:
+                continue
             order_book = await self._data_source.get_order_book(market.market_id)
             self._remember_levels(trading_pair, order_book)
             bids = {level["price"]: level["amount"] for level in order_book["bids"]}

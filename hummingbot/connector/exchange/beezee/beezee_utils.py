@@ -4,7 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 import ecdsa
 from bidict import bidict
@@ -67,6 +67,86 @@ class BeezeeMarket:
     @property
     def min_price_increment(self) -> Decimal:
         return Decimal("1").scaleb(self.base.exponent - self.quote.exponent - CONSTANTS.DEFAULT_PRICE_SIG_DIGITS)
+
+
+# A trading pair's venues. On chain an order-book market and a liquidity pool are unrelated: a pool can exist with no
+# market and a market with no pool, and a pair that has both has them by coincidence.
+VENUE_BOOK = "book"
+VENUE_POOL = "pool"
+VENUE_LABELS = {VENUE_BOOK: "order-book market", VENUE_POOL: "liquidity pool"}
+_VENUE_ARTICLES = {VENUE_BOOK: "an", VENUE_POOL: "a"}
+
+
+class BeezeeVenueError(KeyError):
+    """The pair lacks the venue (order-book market or liquidity pool) the call needs. A KeyError, like an unknown
+    pair, with a readable message."""
+
+    def __str__(self) -> str:
+        return str(self.args[0]) if self.args else ""
+
+
+@dataclass(frozen=True)
+class BeezeePair:
+    """A trading pair and its venues: `market` when it has an order-book market, `pool_id` when it has a liquidity
+    pool (as discovered; a pool created later is still found by the pool tracker). `base` and `quote` give the pair's
+    orientation: the market's when it has one, else the pool's (denoms sorted, as the chain stores pools)."""
+    base: BeezeeToken
+    quote: BeezeeToken
+    market: Optional[BeezeeMarket] = None
+    pool_id: Optional[str] = None
+
+    @property
+    def trading_pair(self) -> str:
+        return f"{self.base.symbol}-{self.quote.symbol}"
+
+    @property
+    def market_id(self) -> Optional[str]:
+        return self.market.market_id if self.market is not None else None
+
+    @property
+    def has_book(self) -> bool:
+        return self.market is not None
+
+    @property
+    def has_pool(self) -> bool:
+        return self.pool_id is not None
+
+    @property
+    def venues(self) -> Tuple[str, ...]:
+        return tuple(venue for venue, present in ((VENUE_BOOK, self.has_book), (VENUE_POOL, self.has_pool)) if present)
+
+    @property
+    def display_price_scaler(self) -> Decimal:
+        return Decimal("1").scaleb(self.quote.exponent - self.base.exponent)
+
+    @property
+    def chain_price_scaler(self) -> Decimal:
+        return Decimal("1") / self.display_price_scaler
+
+    @property
+    def min_price_increment(self) -> Decimal:
+        return Decimal("1").scaleb(self.base.exponent - self.quote.exponent - CONSTANTS.DEFAULT_PRICE_SIG_DIGITS)
+
+
+def describe_venues(venues: Sequence[str]) -> str:
+    """The venues for status lines: order book + pool, order book only, pool only, or no venue."""
+    names = {VENUE_BOOK: "order book", VENUE_POOL: "pool"}
+    present = [names[venue] for venue in (VENUE_BOOK, VENUE_POOL) if venue in venues]
+    if not present:
+        return "no venue"
+    return " + ".join(present) if len(present) > 1 else f"{present[0]} only"
+
+
+def venue_refusal(connector: Any, trading_pair: str, needed: Sequence[str], user: str) -> Optional[str]:
+    """Why `user` (a script or controller) cannot run on the pair, naming the venue it lacks, or None when the pair has
+    every venue in `needed`. Reads the connector's `trading_pair_venues`."""
+    venues = tuple(connector.trading_pair_venues(trading_pair))
+    missing = [venue for venue in needed if venue not in venues]
+    if not missing:
+        return None
+    lacks = " and no ".join(VENUE_LABELS[venue] for venue in missing)
+    wants = " and ".join(f"{_VENUE_ARTICLES[venue]} {VENUE_LABELS[venue]}" for venue in needed)
+    return f"{trading_pair} has no {lacks} (venues: {describe_venues(venues)}); {user} needs {wants}"
 
 
 def safe_symbol(symbol: str, denom: str) -> str:

@@ -11,6 +11,7 @@ from pydantic import Field
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.exchange.beezee.beezee_amm import BeezeeSwapError, BeezeeSwapRequest
 from hummingbot.connector.exchange.beezee.beezee_fills import BeezeeFillError
+from hummingbot.connector.exchange.beezee.beezee_utils import VENUE_BOOK, VENUE_POOL, describe_venues, venue_refusal
 from hummingbot.core.data_type.common import MarketDict, OrderType, TradeType
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
@@ -187,16 +188,21 @@ class BeezeePoolBookArb(StrategyV2Base):
         self._last_skip_reason = skip_reason
 
     def _check_pair(self) -> bool:
-        """Tradebin fees and gas are paid in the native token (BZE), so one side of the pair must be it."""
+        """The pair needs both a liquidity pool and an order-book market (they are unrelated on chain, so a pair may
+        have only one). Tradebin fees and gas are paid in the native token (BZE), so one side of the pair must be it."""
         if self._native is not None:
             return True
         taker = self._taker_fee_token()
         native = taker[0] if taker is not None else "BZE"
-        if native not in (self.base, self.quote):
+        missing_venue = venue_refusal(self.connector, self.pair, (VENUE_POOL, VENUE_BOOK), "pool/book arb")
+        if missing_venue is not None:
+            self._refused = missing_venue
+        elif native not in (self.base, self.quote):
             self._refused = (
                 f"{self.pair} has no {native} side: the fees and the gas are paid in {native} and cannot be counted "
                 f"in the pair's terms. Pick a pair with {native} as base or quote."
             )
+        if self._refused is not None:
             self.log_with_clock(logging.ERROR, f"Pool/book arb refuses to start: {self._refused}")
             return False
         self._native = native
@@ -597,7 +603,8 @@ class BeezeePoolBookArb(StrategyV2Base):
         pool_price = self.connector.get_pool_price(self.pair)
         bid, ask = self._best_bid_ask()
         lines = [
-            f"  Pair: {self.pair}{' (HALTED)' if self._halted else ''}",
+            f"  Pair: {self.pair}{' (HALTED)' if self._halted else ''}   venues: "
+            f"{describe_venues(self.connector.trading_pair_venues(self.pair))}",
             f"  Pool price: {f'{pool_price:.10g}' if pool_price is not None else '-'}   "
             f"best bid: {f'{bid:.10g}' if bid is not None else '-'}   best ask: {f'{ask:.10g}' if ask is not None else '-'}",
             f"  Gap: {self._last_gap or '-'}",

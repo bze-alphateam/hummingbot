@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import ROUND_FLOOR, Decimal
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import yaml
@@ -77,11 +77,16 @@ class FakeBeezeeConnector(ConnectorBase):
         self.pool_price: Optional[Decimal] = None
         self.balances = {"BZE": Decimal("1000000000"), "USDC": Decimal("1000000000")}
         self.rules = {PAIR: TradingRule(PAIR, min_price_increment=TICK, min_base_amount_increment=BASE_STEP)}
+        # A market with no pool by default: the script needs only the book.
+        self.venues: Tuple[str, ...] = ("book",)
         self._next_id = 0
 
     @property
     def name(self) -> str:
         return "beezee"
+
+    def trading_pair_venues(self, trading_pair: str) -> Tuple[str, ...]:
+        return self.venues
 
     @property
     def ready(self) -> bool:
@@ -658,6 +663,30 @@ class BeezeeVolumeTargetTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1, len({order.price for order in batch}))
             self.assertEqual(1, len({order.amount for order in batch}))
         self.assertEqual([False, True, False, True], [batch[0].is_buy for batch in self.connector.batches])
+
+    async def test_it_runs_on_a_market_with_or_without_a_pool(self):
+        for venues in (("book",), ("book", "pool")):
+            self.connector = FakeBeezeeConnector()
+            self.connector.book.bid = 330.0
+            self.connector.book.ask = 340.0
+            self.connector.venues = venues
+            strategy = self._strategy()
+            await self._run_until(NOON)
+            self.assertIsNone(strategy._refused)
+            self.assertEqual(1, len(self.connector.batches))
+
+    async def test_a_pool_only_pair_is_refused_once_naming_the_market(self):
+        self.connector.venues = ("pool",)
+        strategy = self._strategy()
+        with patch.object(strategy, "log_with_clock") as log:
+            await self._run_until(NOON)
+            await self._run_until(NOON + 600)
+        self.assertEqual([], self.connector.batches)
+        self.assertEqual(1, sum("refuses to start" in str(call) for call in log.call_args_list))
+        self.assertEqual(
+            f"  Refused: {PAIR} has no order-book market (venues: pool only); volume target needs an order-book market",
+            strategy.format_status(),
+        )
 
     async def test_missing_balance_skips_the_cycle(self):
         self.connector.balances["USDC"] = Decimal("100")

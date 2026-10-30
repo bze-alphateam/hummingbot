@@ -9,10 +9,11 @@ import asyncio
 import logging
 from dataclasses import dataclass, replace
 from decimal import ROUND_FLOOR, Decimal, localcontext
-from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple, Union
 
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeMarket,
+    BeezeePair,
     chain_amount_to_display,
     chain_price_to_display,
     display_amount_to_chain,
@@ -295,7 +296,11 @@ class BeezeeSwapQuote:
         return self.error is None
 
 
-def _side_denoms(market: BeezeeMarket, side: str):
+# The pool functions take the trading pair's tokens and orientation: a BeezeePair, or a BeezeeMarket (same fields).
+PairTokens = Union[BeezeePair, BeezeeMarket]
+
+
+def _side_denoms(market: PairTokens, side: str):
     if side == SIDE_BUY:
         return market.quote, market.base
     if side == SIDE_SELL:
@@ -303,10 +308,10 @@ def _side_denoms(market: BeezeeMarket, side: str):
     raise ValueError(f"side must be '{SIDE_BUY}' or '{SIDE_SELL}', got {side!r}")
 
 
-def pool_price(pool: BeezeePool, market: BeezeeMarket) -> Optional[Decimal]:
-    """The pool price in the market's orientation and display units (quote per base), like the order prices.
+def pool_price(pool: BeezeePool, market: PairTokens) -> Optional[Decimal]:
+    """The pool price in the pair's orientation and display units (quote per base), like the order prices.
 
-    The pool's base may be the market's quote (pool ids are sorted): the reserves are read by denom, so the price
+    The pool's base may be the pair's quote (pool ids are sorted): the reserves are read by denom, so the price
     comes out inverted where it must be.
     """
     chain_price = pool.spot_price(market.base.denom)
@@ -317,7 +322,7 @@ def pool_price(pool: BeezeePool, market: BeezeeMarket) -> Optional[Decimal]:
         return chain_price_to_display(chain_price, market)
 
 
-def build_swap_quote(pool: BeezeePool, market: BeezeeMarket, side: str, input_amount: int, output_amount: Optional[int] = None) -> BeezeeSwapQuote:
+def build_swap_quote(pool: BeezeePool, market: PairTokens, side: str, input_amount: int, output_amount: Optional[int] = None) -> BeezeeSwapQuote:
     """Quotes swapping `input_amount` chain units on `side`. With `output_amount`, the quote is reported for that
     target output (the input was computed for it) while the effective numbers use what the chain would pay out."""
     input_token, output_token = _side_denoms(market, side)
@@ -352,13 +357,13 @@ def build_swap_quote(pool: BeezeePool, market: BeezeeMarket, side: str, input_am
     )
 
 
-def quote_swap(pool: BeezeePool, market: BeezeeMarket, side: str, amount: Decimal) -> BeezeeSwapQuote:
+def quote_swap(pool: BeezeePool, market: PairTokens, side: str, amount: Decimal) -> BeezeeSwapQuote:
     """Swapping `amount` of the input token (display units): quote on a buy, base on a sell."""
     input_token, _ = _side_denoms(market, side)
     return build_swap_quote(pool, market, side, int(display_amount_to_chain(amount, input_token)))
 
 
-def quote_input_for_output(pool: BeezeePool, market: BeezeeMarket, side: str, amount: Decimal) -> BeezeeSwapQuote:
+def quote_input_for_output(pool: BeezeePool, market: PairTokens, side: str, amount: Decimal) -> BeezeeSwapQuote:
     """The swap that receives at least `amount` of the output token (display units): base on a buy, quote on a
     sell. `input` is the chain's CalculateOptimalInputForOutput; `output` is what that input really buys."""
     input_token, output_token = _side_denoms(market, side)
@@ -415,12 +420,15 @@ class BeezeePoolSource(Protocol):
     async def get_liquidity_pool(self, pool_id: str) -> Optional[Dict[str, Any]]:
         ...
 
-    async def get_market_by_trading_pair(self, trading_pair: str) -> BeezeeMarket:
+    async def get_pair(self, trading_pair: str) -> BeezeePair:
         ...
 
 
 class BeezeePoolTracker:
     """Keeps the pools of the traded pairs and answers pool prices and quotes from memory.
+
+    A pair's pool is the pool of its two denoms, found whether or not the pair has an order-book market (the two are
+    unrelated on chain), and read in the pair's orientation.
 
     The first refresh reads every pool in one paged request; later refreshes (one per new block) read only the pools
     of the traded pairs. A pool is halted when either of its denoms is in `halted_denoms()`, checked at read time,
@@ -432,7 +440,7 @@ class BeezeePoolTracker:
         self._trading_pairs = trading_pairs
         self._halted_denoms = halted_denoms
         self._pools_by_id: Dict[str, BeezeePool] = {}
-        self._markets: Dict[str, BeezeeMarket] = {}
+        self._pairs: Dict[str, BeezeePair] = {}
         self._loaded = False
         self._refresh_lock = asyncio.Lock()
 
@@ -453,9 +461,9 @@ class BeezeePoolTracker:
         pools keep their last known reserves."""
         async with self._refresh_lock:
             for trading_pair in self._trading_pairs():
-                if trading_pair not in self._markets:
+                if trading_pair not in self._pairs:
                     try:
-                        self._markets[trading_pair] = await self._source.get_market_by_trading_pair(trading_pair)
+                        self._pairs[trading_pair] = await self._source.get_pair(trading_pair)
                     except KeyError:
                         continue
             if not self._loaded:
@@ -463,23 +471,23 @@ class BeezeePoolTracker:
                 self._pools_by_id = {pool.pool_id: pool for pool in pools}
                 self._loaded = True
                 return
-            for market in self._markets.values():
-                pool_id = pool_id_for(market.base.denom, market.quote.denom)
+            for pair in self._pairs.values():
+                pool_id = pool_id_for(pair.base.denom, pair.quote.denom)
                 data = await self._source.get_liquidity_pool(pool_id)
                 if data is None:
                     self._pools_by_id.pop(pool_id, None)
                 else:
                     self._pools_by_id[pool_id] = BeezeePool.from_data(data)
 
-    def market(self, trading_pair: str) -> Optional[BeezeeMarket]:
-        return self._markets.get(trading_pair)
+    def pair(self, trading_pair: str) -> Optional[BeezeePair]:
+        return self._pairs.get(trading_pair)
 
     def get_pool(self, trading_pair: str) -> Optional[BeezeePool]:
         """The pair's pool with its halted flag, or None when the pair is unknown or has no pool."""
-        market = self._markets.get(trading_pair)
-        if market is None:
+        pair = self._pairs.get(trading_pair)
+        if pair is None:
             return None
-        pool = self._pools_by_id.get(pool_id_for(market.base.denom, market.quote.denom))
+        pool = self._pools_by_id.get(pool_id_for(pair.base.denom, pair.quote.denom))
         if pool is None:
             return None
         halted = self._halted_denoms()
@@ -488,25 +496,25 @@ class BeezeePoolTracker:
     def get_pool_price(self, trading_pair: str) -> Optional[Decimal]:
         """The pool price in display units, quote per base of the trading pair, or None (no pool, empty pool)."""
         pool = self.get_pool(trading_pair)
-        return None if pool is None else pool_price(pool, self._markets[trading_pair])
+        return None if pool is None else pool_price(pool, self._pairs[trading_pair])
 
     def get_pool_reserves(self, trading_pair: str) -> Optional[Tuple[Decimal, Decimal]]:
         """The pool's (base, quote) reserves in the trading pair's orientation and display units, or None (no pool)."""
         pool = self.get_pool(trading_pair)
         if pool is None:
             return None
-        market = self._markets[trading_pair]
-        base_reserve, quote_reserve = pool.reserves_for(market.base.denom)
-        return chain_amount_to_display(str(base_reserve), market.base), chain_amount_to_display(str(quote_reserve), market.quote)
+        pair = self._pairs[trading_pair]
+        base_reserve, quote_reserve = pool.reserves_for(pair.base.denom)
+        return chain_amount_to_display(str(base_reserve), pair.base), chain_amount_to_display(str(quote_reserve), pair.quote)
 
     def quote_swap(self, trading_pair: str, side: str, amount: Decimal) -> BeezeeSwapQuote:
         pool = self.get_pool(trading_pair)
         if pool is None:
             return BeezeeSwapQuote(trading_pair=trading_pair, side=side, error=f"no liquidity pool for {trading_pair}")
-        return quote_swap(pool, self._markets[trading_pair], side, amount)
+        return quote_swap(pool, self._pairs[trading_pair], side, amount)
 
     def quote_input_for_output(self, trading_pair: str, side: str, amount: Decimal) -> BeezeeSwapQuote:
         pool = self.get_pool(trading_pair)
         if pool is None:
             return BeezeeSwapQuote(trading_pair=trading_pair, side=side, error=f"no liquidity pool for {trading_pair}")
-        return quote_input_for_output(pool, self._markets[trading_pair], side, amount)
+        return quote_input_for_output(pool, self._pairs[trading_pair], side, amount)

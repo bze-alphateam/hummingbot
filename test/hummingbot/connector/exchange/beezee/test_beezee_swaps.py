@@ -112,12 +112,11 @@ class BeezeeSwapTestCase(BeezeeChainTestCase):
         await self.exchange._refresh_pools()
         self._set_balances(BZE=Decimal("1000"), USDC=Decimal("100"))
 
+    def _liquidity_pools(self) -> List[Dict[str, Any]]:
+        return [pool_data()]
+
     def _mock_chain_state(self):
         super()._mock_chain_state()
-        self.mock_api.get(
-            re.compile(rf"^{re.escape(REST_URL + CONSTANTS.ALL_LIQUIDITY_POOLS_PATH_URL)}(\?.*)?$"), repeat=True,
-            payload={"list": [pool_data()], "pagination": {"next_key": None}},
-        )
         self.mock_api.get(
             re.compile(rf"^{re.escape(REST_URL + CONSTANTS.LIQUIDITY_POOL_PATH_URL)}\?.*$"), repeat=True,
             callback=lambda url, **kwargs: self._pool_read(url),
@@ -493,12 +492,11 @@ class BeezeeSwapTests(BeezeeSwapTestCase):
 class BeezeeSwapSequenceTests(BeezeeBatchingTestCase):
     """A swap and an order batch from the same wallet, against the FakeNode: they never race for a sequence."""
 
+    def _liquidity_pools(self) -> List[Dict[str, Any]]:
+        return [pool_data()]
+
     async def asyncSetUp(self) -> None:
         await super().asyncSetUp()
-        self.mock_api.get(
-            re.compile(rf"^{re.escape(REST_URL + CONSTANTS.ALL_LIQUIDITY_POOLS_PATH_URL)}(\?.*)?$"), repeat=True,
-            payload={"list": [pool_data()], "pagination": {"next_key": None}},
-        )
         self.mock_api.get(
             re.compile(rf"^{re.escape(REST_URL + CONSTANTS.LIQUIDITY_POOL_PATH_URL)}\?.*$"), repeat=True,
             payload={"pool": pool_data()},
