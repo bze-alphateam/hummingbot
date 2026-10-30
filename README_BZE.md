@@ -603,6 +603,67 @@ loads it.
 - [ ] Repeat above the ceiling: the bot sells back to the ceiling, never below `keep_base_reserve`.
 - [ ] With a small `buy_budget_quote`, it stops with "buy budget spent today" in `status`.
 
+## Treasury TWAP
+
+`scripts/beezee_treasury_twap.py` buys back (`side: buy`) or sells down (`side: sell`) `total_amount` of a pair's
+base over `duration_hours`, one slice every `slice_interval_seconds` (default 300), without dumping or pumping the
+price. The pair is traded in its own terms: a TOKEN/BZE TWAP buys or sells TOKEN against BZE and nothing is routed
+through other pools (never BZE → USDC). A pair without BZE on either side is refused at start, since the fees and the
+gas are paid in BZE. Upstream's `twap_executor` only takes the book; this script also uses the pool.
+
+Every slice:
+
+1. **Size.** The even slice is `total_amount` / number of slices. A slice is what is left over the slices left, never
+   more than twice the even slice. With `catch_up: true` (default), what earlier slices did not trade (skipped or cut
+   by the impact cap, the limit price or the reserve) is part of what is left, so it is spread over the later slices.
+   With `catch_up: false` it is left over and reported at the end. Either way a refunded or failed part is still
+   left to trade.
+2. **Impact cap and limit price.** The slice is cut to the largest size whose own price impact is at most
+   `max_impact_pct` (default 0.5): its average price against the venue's price before it, pool fee included. On the
+   pool it is computed with `quote_swap`; on the book only levels within `max_impact_pct` of the best level are taken
+   (`levels_to_take`). `limit_price` (optional) is never crossed: no buy above it, no sell below it, the pool's own
+   fee included. If even the smallest size breaks either, or the price is already past the limit, the slice is
+   skipped and the reason logged. A slice never trades bigger to make up for it.
+3. **Reserves.** The input never comes out of `keep_quote_reserve` (buys) / `keep_base_reserve` (sells); when the
+   input is BZE the taker fee and `estimated_gas_bze` come out of the part above the reserve too.
+4. **Venue.** `venue: best` (default) prices the slice on both venues and sends the cheaper one per base (both pay
+   one tradebin taker fee and the gas; the pool price includes its fee), never splitting a slice. `pool` always
+   swaps (`amm_swap` with `slippage_pct`), `book` always takes the book (`fill_orders`). A book slice may be partly
+   refunded by the chain; the refunded part stays in what is left.
+5. **Accounting.** From the swap results and the fill events: base done and left, the average execution price
+   against the reference TWAP (the pool price, or the book mid without a pool, sampled at every slice), the tradebin
+   fees, the gas and the pool fees. When one entry of a book slice fails, the entries that filled still count.
+6. **End.** At completion, at the deadline (after a slice still in flight settles) or on a halted pair, the script
+   stops and logs a summary. Whatever is left is reported, never forced through.
+
+`status` shows the progress (done / total and the % of time elapsed), the next slice's size and the venue it would
+take, the average execution price against the reference TWAP, the skipped slices with their reasons, the fees and gas,
+and the reserves kept. The counters live in memory: after a restart, lower `total_amount` by what was already done.
+
+**Buyback example.** A team wants to buy back 5,000 TOKEN over a week on a TOKEN/BZE pair around 1 BZE: `side: buy`,
+`total_amount: 5000`, `duration_hours: 168`, `slice_interval_seconds: 600` (1,008 slices of about 5 TOKEN),
+`max_impact_pct: 0.5`, `limit_price: 1.2`, `venue: best`, `keep_quote_reserve: 500`. Each slice buys about 5 TOKEN
+wherever it is cheaper, never above 1.2 BZE, never moving the price more than 0.5%, and never spending the last
+500 BZE. If TOKEN rises above 1.2 for a day, those slices are skipped and the later ones buy up to twice as much.
+
+**Sell-down example.** A treasury sells 20,000 TOKEN over 24 hours: `side: sell`, `total_amount: 20000`,
+`duration_hours: 24`, `slice_interval_seconds: 300` (288 slices of about 69.4 TOKEN), `max_impact_pct: 0.5`,
+`limit_price: 0.8`, `catch_up: false`. A slice whose impact would pass 0.5% is cut; below 0.8 BZE nothing is sold;
+with `catch_up: false` what was not sold is reported at the end instead of being pushed into later slices.
+
+**Run.** `cp conf/scripts/beezee_treasury_twap.yml.example hb/conf/scripts/beezee_treasury_twap.yml`, replace the TOKEN
+placeholder, set the side, the amount, the period, the caps and the reserves, fund the wallet (plus BZE for fees),
+then `start --v2 beezee_treasury_twap.yml`. The example is a TOKEN/BZE template that documents every key; a test loads
+it.
+
+**Testnet.** Use a pair with BZE on one side that has both a pool and a book, and a second wallet.
+
+- [ ] Sell down a small total (e.g. 300 TOKEN) over 30 minutes (`duration_hours: 0.5`, `slice_interval_seconds: 300`,
+      `venue: best`): one slice every 5 minutes, each within `max_impact_pct`.
+- [ ] Move the book against the pool with the second wallet (a bid above the pool price, then none): the slices
+      alternate venues as the prices differ.
+- [ ] At the end, the summary (done, average price, fees) matches the trades in BZE Scan.
+
 ## Connector behaviour on chain v8.2.0
 
 - **Wallet modes.** `wallet` takes a hex private key. `wallet_mnemonic` takes a BIP39 mnemonic (optional passphrase)

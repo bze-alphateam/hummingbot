@@ -1,0 +1,57 @@
+#########################################################
+###  Treasury TWAP: TOKEN/BZE template                ###
+#########################################################
+# A template for any token quoted in BZE. Replace the TOKEN placeholder, set the side, the amount and the period,
+# then copy to conf/scripts/beezee_treasury_twap.yml and
+#   start --v2 beezee_treasury_twap.yml
+# The script buys back (side: buy) or sells down (side: sell) total_amount TOKEN over duration_hours, one slice every
+# slice_interval_seconds, each slice capped by its own price impact and sent whole to the cheaper venue. The pair is
+# traded in its own terms: TOKEN against BZE, nothing routed through other pools (never BZE -> USDC).
+# How it works: README_BZE.md, section "Treasury TWAP".
+
+script_file_name: beezee_treasury_twap.py
+controllers_config: []
+
+exchange: beezee
+
+# Placeholder: the pair as the connector lists it, e.g. the factory token's symbol followed by -BZE. One side of the
+# pair must be BZE: the fees and the gas are paid in BZE and counted in the pair's own terms.
+trading_pair: "TOKEN-BZE"
+
+# "buy" buys TOKEN back with BZE, "sell" sells TOKEN for BZE.
+side: sell
+
+# The TOKEN amount to buy or sell over the whole run. Placeholder.
+total_amount: 10000
+
+# The run lasts this long, one slice every slice_interval_seconds: 24 h / 300 s = 288 slices of about 34.7 TOKEN.
+duration_hours: 24
+slice_interval_seconds: 300
+
+# A slice's own price impact (its average price against the venue's price before it, pool fee included), in %. A
+# bigger slice is cut down; a slice whose smallest size is already past it is skipped. Most token pools charge a 0.2%
+# fee, so keep this above it.
+max_impact_pct: 0.5
+
+# Never buy above / sell below this price, in BZE per TOKEN, fees not included. Leave it empty for no limit.
+limit_price:
+
+# "best": the pool quote is compared with taking the book levels, and the cheaper one (fees and gas included) takes
+# the whole slice. "pool": always one swap. "book": always a taker fill. A slice is never split across both.
+venue: best
+
+# A pool swap is refused by the chain rather than pay out more than this % below its quote.
+slippage_pct: 0.5
+
+# Balances the script never spends. Each must be at most the balance at start, or the script refuses to start. The
+# BZE reserve also covers the fees.
+keep_quote_reserve: 100
+keep_base_reserve: 0
+
+# true: what earlier slices did not trade (impact cap, limit price, a refund, ...) is spread over the slices left, each
+# at most twice the even slice. false: skipped and cut amounts are left over and reported at the end (refunds and
+# failed slices are still made up).
+catch_up: true
+
+# Gas of one trade tx in BZE, kept free on the BZE balance: about 200,000 gas x 0.01 ubze = 0.002 BZE.
+estimated_gas_bze: 0.005
