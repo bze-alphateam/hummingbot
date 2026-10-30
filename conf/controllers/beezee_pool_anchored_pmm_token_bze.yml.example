@@ -1,0 +1,45 @@
+#########################################################
+###  Pool-anchored market making: TOKEN/BZE template  ###
+#########################################################
+# A template for any token quoted in BZE that has both a market and a liquidity pool against BZE. Replace every
+# TOKEN placeholder, then copy to conf/controllers/<your name>.yml and list it in a v2_with_controllers script config.
+# The pair is traded in its own terms: prices, the budget and the fees are all in BZE, nothing goes through USDC.
+# How it works and what it costs: README_BZE.md, section "Pool-anchored market making".
+
+id: beezee_pool_anchored_pmm_token_bze
+controller_name: beezee_pool_anchored_pmm
+controller_type: market_making
+connector_name: beezee
+
+# Placeholder: the pair as the connector lists it, e.g. the factory token's symbol followed by -BZE. Run `create`,
+# pick a strategy with `beezee` and look at the trading pair autocomplete for the exact name.
+trading_pair: "TOKEN-BZE"
+
+# Budget for all levels together, in BZE. Placeholder: size it to your inventory. The sell levels need the token,
+# the buy levels the BZE, plus BZE for the fees.
+total_amount_quote: 1000
+
+# Distance of each level from the pool price, as fractions (0.01 = 1%). Most token pools charge a 0.2% fee: a level
+# closer than that + min_spread_over_pool_fee_pct is placed at the floor.
+buy_spreads: "0.01,0.02"
+sell_spreads: "0.01,0.02"
+buy_amounts_pct: "50,50"
+sell_amounts_pct: "50,50"
+
+min_spread_over_pool_fee_pct: 0.1
+requote_threshold_pct: 0.2
+executor_refresh_time: 300
+cooldown_time: 15
+
+# The BeeZee book takes limit orders only: no stop loss, time limit or position rebalance.
+take_profit: 0.02
+take_profit_order_type: LIMIT
+stop_loss:
+time_limit:
+skip_rebalance: true
+leverage: 1
+
+hedge_fills_on_pool: false
+hedge_slippage_pct: 0.5
+min_hedge_profit_pct: 0.1
+estimated_gas_bze: 0.005

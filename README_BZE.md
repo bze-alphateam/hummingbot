@@ -106,8 +106,8 @@ USDC.n lists as `BZE-UUSDC`. To see every pair the connector knows, run `create`
 Hummingbot reads the mid price from the book and does not start quoting on an empty or one-sided book. Before the
 first `start`, make sure the market has at least one bid and one ask: place them from a second wallet in the dex app
 (testnet: testnet-dex.getbze.com, mainnet: dex.getbze.com), or let the
-[tradebin-mm](https://github.com/faneaatiku/tradebin-mm) stopgap bot quote the market. Prices anchored to the
-liquidity pool come later.
+[tradebin-mm](https://github.com/faneaatiku/tradebin-mm) stopgap bot quote the market. To quote around the
+liquidity pool price instead, see "Pool-anchored market making".
 
 ## Running the image
 
@@ -407,6 +407,71 @@ loads it.
 - [ ] A gap smaller than the pool fee + taker fees + `min_profit_pct` sends nothing; `status` says why.
 - [ ] Cancel the second wallet's ask in the same block as the arb (or let another wallet take it first): the fill is
       refunded, `status` shows the imbalance, and one rebalance swap follows (or it is kept), never more.
+
+## Pool-anchored market making
+
+`controllers/market_making/beezee_pool_anchored_pmm.py` is upstream's `pmm_simple` controller quoting around the
+pair's liquidity pool price. On a thin BeeZee book the book's own mid is easy to push, and a bot quoting around it
+gets picked off; on most BZE pairs the pool holds more liquidity and is the better reference. The pair is traded in
+its own terms: a TOKEN/BZE controller prices and budgets in BZE and never goes through USDC.
+
+- **Reference price.** The pool price (`BeezeePoolPriceDelegate`, refreshed on every new block), in the pair's
+  orientation even when the pool lists the denoms the other way round. A pair without a pool, or with an empty one,
+  quotes around the book mid instead: logged once and shown as a `WARNING` line in `status`.
+- **Spreads, levels, amounts, refresh** as in `pmm_simple`: `buy_spreads` / `sell_spreads` (fractions, 0.01 = 1%),
+  `buy_amounts_pct` / `sell_amounts_pct` of `total_amount_quote`, `executor_refresh_time`, `cooldown_time`.
+- **Spread floor.** Every quote is at least pool fee + `min_spread_over_pool_fee_pct` (in %) away from the pool price;
+  a closer level is placed at the floor. Inside the pool fee, a pool arbitrageur could buy from us and sell to the pool
+  (or the reverse) at a profit from our quote alone.
+- **Requote.** Quotes not filled yet are replaced as soon as the reference moved more than `requote_threshold_pct`
+  (in %, default 0.2) from where they were placed, without waiting for `executor_refresh_time`. The cancels and the
+  new orders go out in the connector's batch txs.
+- **Halted pair** (either denom halted by governance): every quote is cancelled once, filled amounts are kept (no
+  market close), and the controller places nothing more. Restart it once the halt is lifted.
+- **Market orders.** The BeeZee book takes limit orders only, so the stop loss, the time limit and the position
+  rebalance (all market orders in upstream's executors) are off by default (`stop_loss`, `time_limit` empty,
+  `skip_rebalance: true`). Without hedge mode a fill is closed by the take-profit limit order, as in `pmm_simple`.
+
+**Hedge mode** (`hedge_fills_on_pool: true`, off by default) makes the controller a cross-venue maker: each fill of
+one of our quotes is swapped back on the pool in the opposite direction (`amm_swap`), so the inventory stays flat and
+we keep the spread minus the pool fee. The quotes are then plain limit orders (an order executor per level), since
+nothing else may close a hedged fill on the book, and a level waits `cooldown_time` after a fill.
+
+1. A fill is hedged only when its distance from the pool price (bought below it, sold above it) is at least the pool
+   fee + the hedge's tradebin taker fee and `estimated_gas_bze` (in % of the fill's value) + `min_hedge_profit_pct`.
+   Otherwise it stays in the inventory (counted as unhedged in `status`).
+2. The fills of one block are netted into one swap, sent once the next block is seen (or after 10 s without block
+   notifications): bought − sold base is sold on the pool, or bought back with quote. The whole swap must still net
+   `min_hedge_profit_pct` of the fills' value after its price impact on the pool, or it is not sent.
+3. The swap's `min_output` is the quote − `hedge_slippage_pct` %. A refused or failed hedge (slippage, halt, an
+   amount too small for the pool) is logged and the inventory kept: it is never retried. One hedge is in flight at a
+   time; the fills meanwhile wait for the next one.
+4. The taker fee and the gas are paid in BZE, so hedge mode needs a pair with BZE on one side; on any other pair the
+   fills are kept and `status` says why. Fills of executors from before the controller started are never hedged.
+
+**Cost example** (BZE/USDC.inj, pool price 0.000333 USDC per BZE, pool fee 0.1%, taker fee 0.1 BZE):
+
+- With `min_spread_over_pool_fee_pct: 0.1` the floor is 0.2%: a 0.1% level is placed at 0.000333666 (sell) and
+  0.000332334 (buy) instead.
+- A sell quote at 0.5% (0.00033467) fills 30,000 BZE for 10.040 USDC. Hedge check: 0.5% ≥ 0.1% pool fee + 0.105 BZE
+  of fees (0.00035% of 10 USDC) + 0.1% margin, so it is hedged. Buying the 30,000 BZE back costs 10.000 USDC at the
+  pool price including the fee, plus the price impact: about 0.45% more on a pool holding 6.7M BZE, which leaves
+  less than the 0.1% margin, so this swap is not sent and the 30,000 BZE sale stays in the inventory. On that pool
+  hedge 5,000 BZE fills (impact about 0.07%): net ≈ 0.5 − 0.1 − 0.07 ≈ 0.33% of the fill, about 0.0055 USDC each.
+
+**Run.** Copy `conf/controllers/beezee_pool_anchored_pmm.yml.example` (BZE/USDC.inj, mainnet) or
+`beezee_pool_anchored_pmm_token_bze.yml.example` (a TOKEN/BZE template, replace the placeholders) to
+`conf/controllers/<name>.yml` and set `total_amount_quote`. Then `create --script-config v2_with_controllers`, list
+`<name>.yml` under `controllers_config`, and `start --v2 <that script config>.yml`. Both examples document every key
+and a test loads them.
+
+**Testnet.** Use a pair that has both a market and a pool, and a second wallet.
+
+- [ ] Run the controller on the pair: the quotes sit around the pool price, none closer than pool fee +
+      `min_spread_over_pool_fee_pct`. Move the pool price with a manual swap from the second wallet: the quotes follow
+      within a block or two (a move above `requote_threshold_pct`), not at the next refresh.
+- [ ] With `hedge_fills_on_pool: true`, take one of our quotes from the second wallet: exactly one hedge swap follows
+      (BZE Scan shows the MsgMultiSwap), `status` counts it, and the inventory is back where it was.
 
 ## Connector behaviour on chain v8.2.0
 
