@@ -466,4 +466,3 @@ class BeezeePoolAnchoredPMM(MarketMakingControllerBase):
             "hedges_failed": self._hedges_failed,
             "unhedged_base": str(self._unhedged_base),
         }
-

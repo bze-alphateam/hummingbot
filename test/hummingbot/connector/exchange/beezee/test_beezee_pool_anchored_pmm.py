@@ -15,7 +15,6 @@ from controllers.market_making.beezee_pool_anchored_pmm import (
 )
 from hummingbot.connector.exchange.beezee.beezee_amm import BeezeePool, BeezeeSwapError, BeezeeSwapQuote, pool_price
 from hummingbot.connector.exchange.beezee.beezee_utils import market_from_data
-from hummingbot.core.data_type.common import TradeType
 from hummingbot.core.data_type.trade_fee import AddedToCostTradeFee, TokenAmount
 from hummingbot.strategy_v2.executors.order_executor.data_types import OrderExecutorConfig
 from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig
