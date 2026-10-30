@@ -496,6 +496,29 @@ class BeezeePriceBandsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(strategy._pending)
         self.assertEqual(Decimal("500"), strategy.buy_budget_left)
 
+    async def test_a_book_trade_with_a_failed_entry_books_what_the_others_filled(self):
+        self._set_pool_price(Decimal("0.8"))
+        self.connector.asks = [(Decimal("0.75"), Decimal("100")), (Decimal("0.78"), Decimal("100"))]
+        strategy = self._strategy(venue="best", max_trade_quote=Decimal("1000"), buy_budget_quote=Decimal("1000"))
+        self._run(2)
+        self.assertEqual([("buy", [(Decimal("0.75"), Decimal("100")), (Decimal("0.78"), Decimal("100"))])],
+                         self.connector.fills)
+        first, second = self.connector.fill_ids[-1]
+        self.connector.trigger_event(MarketEvent.OrderFilled, OrderFilledEvent(
+            timestamp=self.now, order_id=first, trading_pair=self.connector.pair, trade_type=TradeType.BUY,
+            order_type=OrderType.LIMIT, price=Decimal("0.75"), amount=Decimal("100"),
+            trade_fee=AddedToCostTradeFee(flat_fees=[]),
+        ))
+        self._complete(first, True)
+        self.connector.trigger_event(MarketEvent.OrderFailure, MarketOrderFailureEvent(
+            self.now, second, OrderType.LIMIT, "no outcome within 20 blocks"))
+        self.assertIsNone(strategy._pending)
+        self.assertEqual(Decimal("75"), strategy._bought_quote)
+        self.assertEqual(Decimal("925"), strategy.buy_budget_left)
+        self.assertEqual(1, strategy._buys_today.trades)
+        self.assertEqual(Decimal("100"), strategy._buys_today.base)
+        self.assertEqual(TAKER_FEE, strategy._tradebin_fees_today)
+
     # === Sanity ===
 
     async def test_a_floor_not_below_the_ceiling_is_refused(self):

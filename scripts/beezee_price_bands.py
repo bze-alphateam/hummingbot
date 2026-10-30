@@ -543,8 +543,16 @@ class BeezeePriceBands(StrategyV2Base):
         if pending.failure is not None:
             if "halted" in pending.failure.lower():
                 self._set_halted(pending.failure)
-            self.log_with_clock(logging.WARNING, f"Price bands trade failed, nothing traded: {pending.failure}")
-            return
+            if plan.venue == POOL or pending.filled_base <= 0:
+                # One swap message: a failure means nothing was swapped.
+                self.log_with_clock(logging.WARNING, f"Price bands trade failed, nothing traded: {pending.failure}")
+                return
+            # The book entries settle one by one: the ones that filled before another failed still traded.
+            self.log_with_clock(
+                logging.WARNING,
+                f"Price bands {plan.side} on the book partly failed ({pending.failure}): booking the "
+                f"{fmt(pending.filled_base)} {self.base} it filled.",
+            )
         if plan.venue == POOL:
             result = self.connector.get_swap_result(pending.order_ids[0])
             if result is None:
