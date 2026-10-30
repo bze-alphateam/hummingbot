@@ -351,6 +351,63 @@ crossing limit order, it never leaves an order resting: what does not match at t
 - **Matching your own orders.** The chain fills the resting orders at a price in their order, whoever placed them,
   so a fill at a price where this wallet also rests an order may take that order too.
 
+## Pool / order-book arbitrage
+
+`scripts/beezee_pool_book_arb.py` keeps one pair's liquidity pool and its own order book in line and takes the gap
+itself. It trades that one pair only, its pool against its book: no other exchange, no route through other pools.
+
+On every new block (and at least every `check_interval_seconds`):
+
+1. **Read** the pool (`get_pool`, `get_pool_price`) and the book levels around the pool price.
+2. **Opportunity A** (book ask below the pool price): take those asks with a `MsgFillOrders` and sell the same base
+   on the pool. **Opportunity B** (book bid above the pool price): buy the base on the pool and sell it into those
+   bids. When both exist, the one with the larger net profit goes.
+3. **Size.** Book levels are taken best first (`levels_to_take` up to the pool price), each only as far as the part
+   taken from it still beats the pool by `min_profit_pct`: on A the extra quote the pool pays for that part must be at
+   least its book cost × (1 + `min_profit_pct`/100), on B the book's proceeds at least the extra quote the pool
+   charges × (1 + `min_profit_pct`/100). The pool side is the connector's quote, so the pool fee and the price impact are in it.
+   A level is cut at the largest base step that still holds, and dropped when that is below the chain minimum. The
+   total is capped at `max_trade_base` and at the balances above `reserve_base` / `reserve_quote`.
+4. **Profit check.** Net = pool output − book cost (A), or book proceeds − pool input (B), − 2 × the tradebin taker
+   fee (the fill and the swap each pay one, even a fill that matches nothing) − `estimated_gas_bze`. Fees and gas are
+   in BZE: they count 1:1 when BZE is the pair's quote, and at the pool price when BZE is its base. A pair without
+   BZE on either side is refused at start (logged, shown in `status`). The arb is sent only when net ≥
+   `min_profit_pct` % of what it spends.
+5. **One tx.** `fill_orders_and_swap`: the `MsgFillOrders` first, then the `MsgMultiSwap` with `min_output` = quote −
+   `slippage_pct` %. Both legs spend what the wallet already holds, because the fill only executes at the end of the
+   block: A escrows quote for the asks and sells base it has, B escrows base for the bids and spends quote on the
+   pool. Afterwards the base is back where it was and the profit is in quote.
+6. **Partial fills.** The swap settles in the tx, the fill at the end of the block, where an order it aimed at may
+   already be gone: that part is refunded, so the inventory is off by it (A: short of base, B: long). The script
+   records the imbalance. On the next check, with `rebalance_on_partial: true`, it swaps the amount back on the pool
+   if that costs at most `max_rebalance_cost_pct` % of its value (pool fee, impact, a taker fee and gas); otherwise it
+   keeps it. Each imbalance gets at most one attempt, whatever the outcome; kept ones stay in `status`.
+7. **Halted** pool or market (either denom halted by governance, or a refusal saying so): nothing is sent while it
+   lasts, logged once. The script holds no open orders, so there is nothing to exit.
+8. **Cooldown.** After an arb or a rebalance settles, it waits `cooldown_blocks` new blocks (connector
+   `new_blocks_seen`; `cooldown_blocks` × 10 s when no block notification arrives) so the book and the pool show the
+   trade. Only one arb or rebalance is in flight at a time.
+
+`status` shows the pool price against the best bid and ask, the last gap (before the pool fee) and the fixed fees per
+arb, the day's trades, profit in quote (the quote made plus the base made at the pool price, less tradebin fees and
+gas), tradebin fees, gas and pool fees, the open imbalance with each one's state, an arb in flight and the last skip
+reason. The counters live in memory: a restart starts them from zero and forgets open imbalances.
+
+**Run.** `cp conf/scripts/beezee_pool_book_arb.yml.example hb/conf/scripts/beezee_pool_book_arb.yml`, set
+`max_trade_base` and the reserves, fund the wallet with both tokens (plus BZE for fees), then
+`start --v2 beezee_pool_book_arb.yml`. The example is for BZE/USDC.inj on mainnet and documents every key; a test
+loads it.
+
+**Testnet.** Use a pair with BZE on one side that has both a market and a pool, and a second wallet.
+
+- [ ] Place a resting ask well below the pool price from the second wallet and start the script: one arb tx
+      (MsgFillOrders + MsgMultiSwap) goes out, its profit shows in `status`, and BZE Scan shows the tx with both
+      messages.
+- [ ] The mirror: a resting bid well above the pool price gives one tx that sells into it and buys on the pool.
+- [ ] A gap smaller than the pool fee + taker fees + `min_profit_pct` sends nothing; `status` says why.
+- [ ] Cancel the second wallet's ask in the same block as the arb (or let another wallet take it first): the fill is
+      refunded, `status` shows the imbalance, and one rebalance swap follows (or it is kept), never more.
+
 ## Connector behaviour on chain v8.2.0
 
 - **Wallet modes.** `wallet` takes a hex private key. `wallet_mnemonic` takes a BIP39 mnemonic (optional passphrase)

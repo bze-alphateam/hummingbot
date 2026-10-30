@@ -386,6 +386,12 @@ class BeezeeExchangePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.exchange.quote_swap("BZE-USDC", "sell", Decimal("10")).ok)
         self.data_source.get_halted_denoms.assert_awaited()
 
+    async def test_new_blocks_are_counted(self):
+        self.assertEqual(0, self.exchange.new_blocks_seen)
+        await self._new_block()
+        await self._new_block()
+        self.assertEqual(2, self.exchange.new_blocks_seen)
+
     async def test_halted_denom_from_the_connector_cache_halts_the_pool(self):
         self.data_source.get_halted_denoms = AsyncMock(return_value={"ubze"})
         await self._new_block()

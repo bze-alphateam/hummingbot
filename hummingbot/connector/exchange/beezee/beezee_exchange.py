@@ -239,6 +239,7 @@ class BeezeeExchange(ExchangePyBase):
         # One task per swap tx: sending it, then reading its result (keyed by the first swap's client order id).
         self._swap_tasks: Dict[str, asyncio.Task] = {}
         self._swap_results: "OrderedDict[str, BeezeeSwapResult]" = OrderedDict()
+        self._new_blocks_seen = 0
         # Swaps restored from a saved state, followed again on the next status update.
         self._swaps_to_resume: Set[str] = set()
         # Fill entries' client order id -> the first entry of their MsgFillOrders (see "Taker fills").
@@ -322,6 +323,12 @@ class BeezeeExchange(ExchangePyBase):
     def gas_fees_paid(self) -> Decimal:
         """Gas fees of every tx this connector broadcast since it started, in the native token (BZE)."""
         return self._build_data_source().gas_fees_paid
+
+    @property
+    def new_blocks_seen(self) -> int:
+        """How many NewBlock notifications arrived since the connector started. Scripts count blocks with it (e.g. a
+        cooldown in blocks); it does not advance while the block websocket is down and the book is polled."""
+        return self._new_blocks_seen
 
     def minimum_order_amount(self, trading_pair: str, price: Decimal) -> Decimal:
         """The chain's minimum order size at `price`, in base display units: ceil(1 / chain price) x 2 base units.
@@ -1632,6 +1639,7 @@ class BeezeeExchange(ExchangePyBase):
         return None
 
     def _on_new_block(self):
+        self._new_blocks_seen += 1
         self._schedule_pool_refresh()
         if self.is_trading_required and not self._block_processing_lock.locked():
             safe_ensure_future(self._update_order_status())
