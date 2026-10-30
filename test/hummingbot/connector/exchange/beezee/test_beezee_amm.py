@@ -194,6 +194,22 @@ class BeezeePoolTrackerTests(unittest.IsolatedAsyncioTestCase):
         expected = Decimal(data["reserve_quote"]) / Decimal(data["reserve_base"]) / Decimal(10 ** 6)
         self.assertAlmostEqual(expected, self.tracker.get_pool_price("CTL-BZE"), places=20)
 
+    async def test_reserves_are_in_the_pair_orientation_and_display_units(self):
+        await self.tracker.refresh()
+        usdc = recorded_pool(USDC_POOL)
+        ctl = recorded_pool(CTL_POOL)
+        # USDC pool: base = USDC, quote = ubze, read for BZE-USDC as (BZE, USDC), both with six decimals.
+        self.assertEqual(
+            (Decimal(usdc["reserve_quote"]) / Decimal(10 ** 6), Decimal(usdc["reserve_base"]) / Decimal(10 ** 6)),
+            self.tracker.get_pool_reserves("BZE-USDC"),
+        )
+        # CTL has no decimals, BZE six.
+        self.assertEqual(
+            (Decimal(ctl["reserve_base"]), Decimal(ctl["reserve_quote"]) / Decimal(10 ** 6)),
+            self.tracker.get_pool_reserves("CTL-BZE"),
+        )
+        self.assertIsNone(self.tracker.get_pool_reserves("UNKNOWN-BZE"))
+
     async def test_quotes_map_the_side_to_the_pool_denoms(self):
         await self.tracker.refresh()
         pool = BeezeePool.from_data(recorded_pool(USDC_POOL))

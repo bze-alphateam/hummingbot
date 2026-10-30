@@ -490,6 +490,15 @@ class BeezeePoolTracker:
         pool = self.get_pool(trading_pair)
         return None if pool is None else pool_price(pool, self._markets[trading_pair])
 
+    def get_pool_reserves(self, trading_pair: str) -> Optional[Tuple[Decimal, Decimal]]:
+        """The pool's (base, quote) reserves in the trading pair's orientation and display units, or None (no pool)."""
+        pool = self.get_pool(trading_pair)
+        if pool is None:
+            return None
+        market = self._markets[trading_pair]
+        base_reserve, quote_reserve = pool.reserves_for(market.base.denom)
+        return chain_amount_to_display(str(base_reserve), market.base), chain_amount_to_display(str(quote_reserve), market.quote)
+
     def quote_swap(self, trading_pair: str, side: str, amount: Decimal) -> BeezeeSwapQuote:
         pool = self.get_pool(trading_pair)
         if pool is None:
