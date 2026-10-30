@@ -391,6 +391,10 @@ class BeezeeExchange(ExchangePyBase):
         """The pool price in the units of the pair's order prices (quote per base, display units), or None."""
         return self._build_pool_tracker().get_pool_price(trading_pair)
 
+    def get_pool_reserves(self, trading_pair: str) -> Optional[Tuple[Decimal, Decimal]]:
+        """The pool's (base, quote) reserves in display units of the pair, as of the last block, or None."""
+        return self._build_pool_tracker().get_pool_reserves(trading_pair)
+
     def quote_swap(self, trading_pair: str, side: str, amount: Decimal) -> BeezeeSwapQuote:
         """What the pool pays for `amount` of the input token: quote on a "buy", base on a "sell"."""
         return self._build_pool_tracker().quote_swap(trading_pair, side, amount)
