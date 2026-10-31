@@ -793,13 +793,13 @@ bot's included; the arb script would take the controller's own quotes). Give eve
   | Script / controller | Forgotten on restart | Do before restarting |
   |---|---|---|
   | Arbitrage | open imbalances, the day's trades and profit | rebalance a kept imbalance by hand if you want it gone |
-  | Pool-anchored MM | hedge counters, the fills seen, unhedged fills | after the first requote, check the book holds one set of quotes |
+  | Pool-anchored MM | hedge counters, the fills seen, unhedged fills | nothing: the restart cancels the old quotes and places one new set |
   | Pool volume | the day's volume and fee spend | lower `daily_volume_quote` / `max_daily_fee_spend` by what was done today |
   | Bands | budget spent | with `budget_period: total`, lower the budgets by what was spent |
   | TWAP | amount done, slices, reference TWAP | lower `total_amount` (and `duration_hours`) by what was done |
 
-  A `docker kill` keeps the controller's orders on the book and the restart adopts them (see "Restart with open
-  orders"); `stop` cancels them first.
+  A `docker kill` leaves the controller's orders on the book; the restart cancels them before the first tick and the
+  controller places a new set (see "Restart with open orders"). `stop` cancels them first.
 
 ### Known behaviour
 
@@ -904,7 +904,10 @@ itself follows "Testnet run" with the config of the script.
   An order on a pair the new config no longer trades is cancelled, logged at INFO. `max_order_age` counts from the
   restart for an adopted order. The adoption lives in the strategy base, so every strategy built on it gets it (tested
   with PMM); `beezee_volume_target.py` places its orders past that tracker, so it also counts the restored orders on
-  its pair as its own, and its first cycle cancels a leg a crash left half-done.
+  its pair as its own, and its first cycle cancels a leg a crash left half-done. A V2 strategy with controllers
+  (`v2_with_controllers`, e.g. the pool-anchored controller) is the exception: its controllers trade only through
+  executors, which never own a restored order, so its restored orders are cancelled at start (logged at INFO) and the
+  controllers place a new set on their first tick.
 - **Batched txs.** Creates and cancels go out in batch txs: all messages submitted within `batch_window_ms`
   (default `300`) of the first one share one tx, simulated, signed and broadcast once, with at most
   `max_messages_per_tx` messages (default `25`; a larger batch is split into consecutive txs). Cancels come first, so

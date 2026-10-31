@@ -616,17 +616,26 @@ cdef class StrategyBase(TimeIterator):
     def track_restored_orders(self, market_pair: MarketTradingPairTuple):
         return self.c_track_restored_orders(market_pair)
 
+    def adopts_restored_orders(self) -> bool:
+        """BZE fork: whether c_adopt_restored_orders adopts the restored orders on the traded pairs (True) or cancels
+        them (False). A strategy that does not manage its orders through the strategy base's order tracker (a V2
+        strategy trading through executors) has nothing that would ever refresh or cancel an adopted order."""
+        return True
+
     cdef c_adopt_restored_orders(self):
         # BZE fork: after a crash or restart the connectors hold the previous run's open orders (restored from the
         # saved tracking states before the clock starts). A strategy only manages orders in its own tracker, so
         # without this they rest unmanaged at stale prices while the strategy places a new set beside them.
         # Runs in c_start, before the first tick: orders on a pair the strategy trades are tracked as if the
-        # strategy had placed them (PMM keeps or refreshes them like its own), and orders on any other pair are
-        # cancelled. Orders still waiting for their exchange id are adopted too, so nothing is created beside them.
+        # strategy had placed them (PMM keeps or refreshes them like its own), unless the strategy does not adopt
+        # restored orders (adopts_restored_orders), and every other order is cancelled. Orders still waiting for
+        # their exchange id are adopted (or cancelled) too, so nothing is created beside them.
+        cdef bint adopts = self.adopts_restored_orders()
         for market in list(self._sb_markets):
             traded_pairs = set(getattr(market, "trading_pairs", None) or [])
             for order in list(getattr(market, "limit_orders", None) or []):
-                if not traded_pairs or order.trading_pair in traded_pairs:
+                traded = not traded_pairs or order.trading_pair in traded_pairs
+                if traded and adopts:
                     base, quote = order.trading_pair.split("-")
                     self.c_start_tracking_limit_order(MarketTradingPairTuple(market, order.trading_pair, base, quote),
                                                       order.client_order_id,
@@ -636,8 +645,9 @@ cdef class StrategyBase(TimeIterator):
                     self.logger().info(f"Adopted restored order {order.client_order_id} ({order.trading_pair} "
                                        f"{'buy' if order.is_buy else 'sell'} {order.quantity} @ {order.price}).")
                 else:
-                    self.logger().info(f"Cancelling restored order {order.client_order_id}: the strategy does not "
-                                       f"trade {order.trading_pair}.")
+                    reason = "the strategy does not adopt restored orders" if traded else \
+                        f"the strategy does not trade {order.trading_pair}"
+                    self.logger().info(f"Cancelling restored order {order.client_order_id}: {reason}.")
                     market.cancel(order.trading_pair, order.client_order_id)
 
     def notify_hb_app(self, msg: str):

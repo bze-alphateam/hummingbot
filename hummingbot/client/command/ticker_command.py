@@ -46,12 +46,10 @@ class TickerCommand:
 
         def get_ticker():
             columns = ["Best Bid", "Best Ask", "Mid Price", "Last Trade"]
-            data = [[
-                float(market_connector.get_price_by_type(trading_pair, PriceType.BestBid)),
-                float(market_connector.get_price_by_type(trading_pair, PriceType.BestAsk)),
-                float(market_connector.get_price_by_type(trading_pair, PriceType.MidPrice)),
-                float(market_connector.get_price_by_type(trading_pair, PriceType.LastTrade))
-            ]]
+            # A connector may answer None for a price it does not have (e.g. beezee on an empty book without a pool).
+            prices = [market_connector.get_price_by_type(trading_pair, price_type) for price_type in
+                      (PriceType.BestBid, PriceType.BestAsk, PriceType.MidPrice, PriceType.LastTrade)]
+            data = [[float("nan") if price is None else float(price) for price in prices]]
             ticker_df = pd.DataFrame(data=data, columns=columns)
             ticker_df_str = format_df_for_printout(ticker_df, self.client_config_map.tables_format)
             return f"   Market: {market_connector.name}\n{ticker_df_str}"

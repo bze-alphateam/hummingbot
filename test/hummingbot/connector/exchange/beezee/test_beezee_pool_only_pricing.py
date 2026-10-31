@@ -4,7 +4,7 @@ import time
 import unittest
 from decimal import Decimal
 from test.hummingbot.connector.exchange.beezee.test_beezee_venues import make_data_source
-from typing import List
+from typing import List, Optional
 from unittest.mock import AsyncMock, Mock, patch
 
 from hummingbot.client.performance import PerformanceMetrics
@@ -16,6 +16,7 @@ from hummingbot.connector.exchange.beezee.beezee_utils import (
 )
 from hummingbot.core.data_type.common import PositionAction, PriceType
 from hummingbot.core.data_type.order_book import OrderBook
+from hummingbot.core.data_type.order_book_row import OrderBookRow
 from hummingbot.core.data_type.trade_fee import AddedToCostTradeFee, TokenAmount
 from hummingbot.core.rate_oracle.rate_oracle import RateOracle
 from hummingbot.model.order import Order  # noqa — Order needs to be defined for TradeFill
@@ -52,11 +53,12 @@ class BeezeePoolOnlyPricingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.pool_price, self.exchange.get_price("TUSDC-BZE", False))
         self.assertEqual(self.pool_price, self.exchange.get_mid_price("TUSDC-BZE"))
 
-    def test_a_pair_with_an_order_book_market_keeps_the_book_prices(self):
-        # BZE-USDC also has a pool, but its prices stay the book's: NaN on an empty book, as before.
-        self.assertIsNotNone(self.exchange.get_pool_price("BZE-USDC"))
+    def test_a_market_pair_with_a_pool_answers_its_pool_price_on_an_empty_book(self):
+        # BZE-USDC has a market and a pool; its book is empty here, so every price falls back to the pool price.
+        pool_price = self.exchange.get_pool_price("BZE-USDC")
+        self.assertEqual(Decimal("0.0005"), pool_price)
         for price_type in PRICE_TYPES:
-            self.assertTrue(self.exchange.get_price_by_type("BZE-USDC", price_type).is_nan(), price_type)
+            self.assertEqual(pool_price, self.exchange.get_price_by_type("BZE-USDC", price_type), price_type)
 
     def test_a_pool_only_pair_without_a_pool_price_answers_none(self):
         self.exchange.get_pool_price = Mock(return_value=None)
@@ -93,6 +95,93 @@ class BeezeePoolOnlyPricingTests(unittest.IsolatedAsyncioTestCase):
         self.exchange.get_pool_price = Mock(return_value=None)
         self.exchange._orderbook_ds._pool_price_provider = self.exchange.get_pool_price
         self.assertTrue(math.isnan(await self.exchange._get_last_traded_price("TUSDC-BZE")))
+
+
+class BeezeeOneSidedBookPricingTests(unittest.IsolatedAsyncioTestCase):
+    """A pair with an order-book market whose book has an empty side (a new or thin market, where the bot may be the
+    only liquidity on one side). The upstream getters answered NaN for the empty side and the mid, and the rate oracle
+    raised decimal.InvalidOperation on it, which broke `history`, the trade monitor and the fee conversion.
+
+    BZE-USDC (market BZE/USDC) has a pool oriented the other way (USDC_ubze), as mainnet BZE/USDC.inj; OTHER-BZE has
+    no pool."""
+
+    async def asyncSetUp(self) -> None:
+        self.exchange = await make_exchange(["BZE-USDC", "OTHER-BZE"])
+        self.exchange._trading_rules = {rule.trading_pair: rule for rule in await self.exchange._format_trading_rules({})}
+        await self.exchange._build_pool_tracker().refresh()
+        self.bid = self.exchange.quantize_order_price("BZE-USDC", Decimal("0.00049"))
+        self.ask = self.exchange.quantize_order_price("BZE-USDC", Decimal("0.00052"))
+        for trading_pair in ("BZE-USDC", "OTHER-BZE"):
+            self.exchange.order_book_tracker._order_books[trading_pair] = one_sided_book(bid=self.bid)
+        self.pool_price = self.exchange.get_pool_price("BZE-USDC")
+        self.oracle = RateOracle(source=Mock())
+        self.oracle._prices = {"BTC-USDT": Decimal("100000")}
+        self.oracle.register_connector(self.exchange)
+
+    async def asyncTearDown(self) -> None:
+        await stop(self.exchange)
+
+    def test_the_present_side_is_the_book_price_the_rest_the_pool_price_in_the_pair_orientation(self):
+        self.assertEqual(Decimal("0.0005"), self.pool_price)
+        self.assertEqual(self.bid, self.exchange.get_price_by_type("BZE-USDC", PriceType.BestBid))
+        self.assertEqual(self.bid, self.exchange.get_price("BZE-USDC", False))
+        self.assertEqual(self.pool_price, self.exchange.get_price_by_type("BZE-USDC", PriceType.BestAsk))
+        self.assertEqual(self.pool_price, self.exchange.get_price("BZE-USDC", True))
+        # The mid of a one-sided book is the pool price, not the one side left.
+        self.assertEqual(self.pool_price, self.exchange.get_price_by_type("BZE-USDC", PriceType.MidPrice))
+        self.assertEqual(self.pool_price, self.exchange.get_mid_price("BZE-USDC"))
+        self.assertEqual(self.pool_price, self.exchange.get_price_by_type("BZE-USDC", PriceType.LastTrade))
+
+    def test_a_two_sided_book_keeps_the_book_prices(self):
+        self.exchange.order_book_tracker._order_books["BZE-USDC"] = one_sided_book(bid=self.bid, ask=self.ask)
+        self.assertEqual(self.bid, self.exchange.get_price_by_type("BZE-USDC", PriceType.BestBid))
+        self.assertEqual(self.ask, self.exchange.get_price_by_type("BZE-USDC", PriceType.BestAsk))
+        self.assertEqual((self.bid + self.ask) / 2, self.exchange.get_price_by_type("BZE-USDC", PriceType.MidPrice))
+        self.assertEqual((self.bid + self.ask) / 2, self.exchange.get_mid_price("BZE-USDC"))
+
+    def test_the_rate_oracle_prices_the_pair_at_the_pool_price_without_raising(self):
+        self.assertEqual(self.pool_price, self.oracle.get_pair_rate("BZE-USDC"))
+        self.assertEqual(Decimal("1") / self.pool_price, self.oracle.get_pair_rate("USDC-BZE"))
+
+    async def test_performance_metrics_with_one_trade_on_the_one_sided_market(self):
+        trade_fee = AddedToCostTradeFee(flat_fees=[TokenAmount("BZE", Decimal("0.1"))])
+        trade = TradeFill(
+            config_file_path="beezee_treasury_twap.yml", strategy="beezee_treasury_twap", market="beezee",
+            symbol="BZE-USDC", base_asset="BZE", quote_asset="USDC", timestamp=int(time.time() * 1e3),
+            order_id="sell-1", trade_type="SELL", order_type="LIMIT", price=float(self.bid), amount=1000,
+            trade_fee=trade_fee.to_json(), exchange_trade_id="CD" * 32, position=PositionAction.NIL.value,
+        )
+        with patch.object(RateOracle, "get_instance", return_value=self.oracle):
+            metrics = await PerformanceMetrics.create(
+                "BZE-USDC", [trade], {"BZE": Decimal("9000"), "USDC": Decimal("10.49")})
+        self.assertEqual(1, metrics.num_trades)
+        self.assertEqual(self.pool_price, metrics.cur_price)
+
+    def test_a_pair_without_a_pool_answers_none_for_what_its_book_lacks(self):
+        self.assertIsNone(self.exchange.get_pool_price("OTHER-BZE"))
+        bid = self.exchange.get_price_by_type("OTHER-BZE", PriceType.BestBid)
+        self.assertFalse(bid.is_nan())
+        for price_type in (PriceType.BestAsk, PriceType.MidPrice, PriceType.LastTrade):
+            self.assertIsNone(self.exchange.get_price_by_type("OTHER-BZE", price_type), price_type)
+        self.assertIsNone(self.exchange.get_price("OTHER-BZE", True))
+        self.assertIsNone(self.exchange.get_mid_price("OTHER-BZE"))
+        self.assertIsNone(self.oracle.get_pair_rate("OTHER-BZE"))
+        self.assertIsNone(self.oracle.get_pair_rate("BZE-OTHER"))
+
+    def test_a_pair_without_a_pool_answers_none_on_an_empty_book(self):
+        self.exchange.order_book_tracker._order_books["OTHER-BZE"] = OrderBook()
+        for price_type in PRICE_TYPES:
+            self.assertIsNone(self.exchange.get_price_by_type("OTHER-BZE", price_type), price_type)
+        self.assertIsNone(self.exchange.get_price("OTHER-BZE", False))
+        self.assertIsNone(self.oracle.get_pair_rate("OTHER-BZE"))
+
+
+def one_sided_book(bid: Decimal, ask: Optional[Decimal] = None) -> OrderBook:
+    """A book with one bid level and, when given, one ask level."""
+    order_book = OrderBook()
+    asks = [] if ask is None else [OrderBookRow(float(ask), 100.0, 1)]
+    order_book.apply_snapshot([OrderBookRow(float(bid), 100.0, 1)], asks, 1)
+    return order_book
 
 
 class BeezeePoolReadinessTests(unittest.IsolatedAsyncioTestCase):
