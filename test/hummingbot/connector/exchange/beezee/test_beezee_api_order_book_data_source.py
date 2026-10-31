@@ -1,4 +1,5 @@
 import asyncio
+import math
 import unittest
 from decimal import Decimal
 from unittest.mock import AsyncMock, Mock
@@ -23,14 +24,24 @@ class BeezeeAPIOrderBookDataSourceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([["1.0", "6"], ["2.0", "0"], ["3.0", "7"]], diffs)
 
-    async def test_get_last_traded_prices_omits_non_finite_price(self):
+    async def test_get_last_traded_prices_answers_nan_for_a_non_finite_price(self):
         market = Mock(market_id="ubze/uusdc")
         self.data_source._data_source.get_market_by_trading_pair = AsyncMock(return_value=market)
         self.data_source._data_source.get_last_traded_price = AsyncMock(return_value=Decimal("NaN"))
 
         prices = await self.data_source.get_last_traded_prices(["BZE-USDC"])
 
-        self.assertEqual({}, prices)
+        self.assertEqual(["BZE-USDC"], list(prices))
+        self.assertTrue(math.isnan(prices["BZE-USDC"]))
+
+    async def test_get_last_traded_prices_answers_nan_for_a_market_with_no_trades(self):
+        market = Mock(market_id="ubze/uusdc")
+        self.data_source._data_source.get_market_by_trading_pair = AsyncMock(return_value=market)
+        self.data_source._data_source.get_last_traded_price = AsyncMock(return_value=None)
+
+        prices = await self.data_source.get_last_traded_prices(["BZE-USDC"])
+
+        self.assertTrue(math.isnan(prices["BZE-USDC"]))
 
     async def test_listen_for_subscriptions_falls_back_to_polling(self):
         self.data_source._listen_new_blocks = AsyncMock(side_effect=Exception("ws unavailable"))
