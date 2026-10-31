@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from aioresponses import CallbackResult
 
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
+from hummingbot.connector.exchange.beezee.beezee_delegation import BeezeeDelegation
 from hummingbot.connector.exchange.beezee.beezee_utils import BeezeeDelegatedMnemonicAccountMode
 from hummingbot.core.data_type.common import OrderType
 from hummingbot.core.event.events import MarketEvent
@@ -105,6 +106,10 @@ class BeezeeDelegationTestCase(BeezeeChainTestCase):
         self.broadcast_refusal: Optional[tuple] = None
         await super().asyncSetUp()
         self.exchange._time = lambda: self.now
+        # The grant checks log to their own module's logger.
+        BeezeeDelegation.logger().setLevel(1)
+        BeezeeDelegation.logger().addHandler(self)
+        self.addCleanup(BeezeeDelegation.logger().removeHandler, self)
 
     def _mock_chain_state(self):
         super()._mock_chain_state()
