@@ -39,6 +39,8 @@ SIMULATE_TX_PATH_URL = "/cosmos/tx/v1beta1/simulate"
 HALTED_DENOMS_PATH_URL = "/bze/tradebin/halted_denoms"
 ALL_LIQUIDITY_POOLS_PATH_URL = "/bze/tradebin/all_liquidity_pools"
 LIQUIDITY_POOL_PATH_URL = "/bze/tradebin/liquidity_pool"
+AUTHZ_GRANTS_PATH_URL = "/cosmos/authz/v1beta1/grants"
+FEE_ALLOWANCE_PATH_URL = "/cosmos/feegrant/v1beta1/allowance"
 # CometBFT RPC
 RPC_STATUS_PATH_URL = "/status"
 BLOCK_RESULTS_PATH_URL = "/block_results"
@@ -121,6 +123,31 @@ DENOM_HALTED_ERROR_CODE = 4017
 DENOM_HALTED_ERROR_MESSAGE = "denom is halted"
 ACCOUNT_SEQUENCE_MISMATCH_MESSAGE = "account sequence mismatch"
 
+# Delegated modes (see "Delegated account" in README_BZE.md): the grants the granter gives the bot key.
+MSG_EXEC_TYPE_URL = "/cosmos.authz.v1beta1.MsgExec"
+GENERIC_AUTHORIZATION_TYPE_URL = "/cosmos.authz.v1beta1.GenericAuthorization"
+DELEGATED_MESSAGE_TYPE_URLS = (
+    "/bze.tradebin.MsgCreateOrder",
+    "/bze.tradebin.MsgCancelOrder",
+    "/bze.tradebin.MsgMultiSwap",
+    "/bze.tradebin.MsgFillOrders",
+)
+BASIC_ALLOWANCE_TYPE_URL = "/cosmos.feegrant.v1beta1.BasicAllowance"
+PERIODIC_ALLOWANCE_TYPE_URL = "/cosmos.feegrant.v1beta1.PeriodicAllowance"
+ALLOWED_MSG_ALLOWANCE_TYPE_URL = "/cosmos.feegrant.v1beta1.AllowedMsgAllowance"
+DELEGATION_CHECK_INTERVAL = 300.0
+# The stage of the BeezeeTxRefusedError raised for a tx the connector did not send because the grants are invalid.
+DELEGATION_STAGE = "delegation check"
+DELEGATION_EXPIRY_WARNING = 72 * 3600.0
+# The feegrant query answers a missing allowance with HTTP 500 (gRPC Internal) and this text.
+FEE_GRANT_NOT_FOUND_MESSAGE = "fee-grant not found"
+# Refusals that mean a grant or the allowance is missing, expired, spent or too narrow: codespace -> code -> the error's
+# text (cosmos-sdk v0.50 x/authz, cosmossdk.io/x/feegrant v0.1). A simulation refusal carries only the text.
+DELEGATION_REFUSALS = {
+    "authz": {2: "authorization not found", 6: "authorization expired"},
+    "feegrant": {2: "fee limit exceeded", 3: "fee allowance expired", 5: "no allowance", 7: "message not allowed"},
+}
+
 GENERAL_LIMIT_ID = "beezee_general"
 QUERY_LIMIT_ID = "beezee_query"
 TX_LIMIT_ID = "beezee_tx"
@@ -159,5 +186,7 @@ RATE_LIMITS = [
     RateLimit(limit_id=HALTED_DENOMS_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
     RateLimit(limit_id=ALL_LIQUIDITY_POOLS_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
     RateLimit(limit_id=LIQUIDITY_POOL_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
+    RateLimit(limit_id=AUTHZ_GRANTS_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
+    RateLimit(limit_id=FEE_ALLOWANCE_PATH_URL, limit=120, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(QUERY_LIMIT_ID, 1)]),
     RateLimit(limit_id=BROADCAST_TX_PATH_URL, limit=30, time_interval=MINUTE, linked_limits=[LinkedLimitWeightPair(TX_LIMIT_ID, 1)]),
 ]

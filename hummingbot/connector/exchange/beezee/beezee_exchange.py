@@ -30,6 +30,7 @@ from hummingbot.connector.exchange.beezee.beezee_api_data_source import (
 from hummingbot.connector.exchange.beezee.beezee_api_order_book_data_source import BeezeeAPIOrderBookDataSource
 from hummingbot.connector.exchange.beezee.beezee_api_user_stream_data_source import BeezeeAPIUserStreamDataSource
 from hummingbot.connector.exchange.beezee.beezee_auth import BeezeeAuth
+from hummingbot.connector.exchange.beezee.beezee_delegation import BeezeeDelegation
 from hummingbot.connector.exchange.beezee.beezee_denom_labels import BeezeeDenomLabels
 from hummingbot.connector.exchange.beezee.beezee_events import TradebinEvent, block_tradebin_events, tx_tradebin_events
 from hummingbot.connector.exchange.beezee.beezee_fills import (
@@ -219,6 +220,8 @@ class BeezeeExchange(ExchangePyBase):
         self._renamed_trading_pairs: Dict[str, str] = {}
 
         self._data_source: Optional[BeezeeAPIDataSource] = None
+        # Delegated modes: the grant checks, built with the data source.
+        self._delegation: Optional[BeezeeDelegation] = None
         self._pool_tracker: Optional[BeezeePoolTracker] = None
         self._pool_refresh_task: Optional[asyncio.Task] = None
         self._trade_fees: Dict[str, Optional[TokenAmount]] = {}
@@ -340,6 +343,9 @@ class BeezeeExchange(ExchangePyBase):
         status["symbols_mapping_initialized"] = True
         status["pools_initialized"] = self._pools_initialized()
         status["trading_pair_names_current"] = not self._renamed_trading_pairs
+        delegation = self._build_delegation()
+        if delegation is not None:
+            status["delegation_grants_valid"] = delegation.grants_valid
         if not all(status.values()):
             now = time.time()
             if now - self._last_status_log_timestamp >= 30.0:
@@ -351,6 +357,13 @@ class BeezeeExchange(ExchangePyBase):
     @property
     def ready(self) -> bool:
         return all(self.status_dict.values())
+
+    @property
+    def delegation_status(self) -> Optional[str]:
+        """Delegated modes: whether the grants are valid (and why not), their earliest expiry and, for a spend-limited
+        feegrant allowance, what it can still spend. None in the wallet modes."""
+        delegation = self._build_delegation()
+        return delegation.status_text if delegation is not None else None
 
     def _pools_initialized(self) -> bool:
         """False until the first pool refresh completes, when a traded pair has a liquidity pool: the pools are read in
@@ -447,7 +460,14 @@ class BeezeeExchange(ExchangePyBase):
                 denom_labels=self._denom_labels,
                 granter_address=self._granter_address,
             )
+            if self._granter_address is not None:
+                self._delegation = BeezeeDelegation(reader=self._data_source, clock=lambda: self._time())
+                self._data_source.set_tx_guard(self._delegation)
         return self._data_source
+
+    def _build_delegation(self) -> Optional[BeezeeDelegation]:
+        self._build_data_source()
+        return self._delegation
 
     def _build_pool_tracker(self) -> BeezeePoolTracker:
         if self._pool_tracker is None:
@@ -1436,6 +1456,8 @@ class BeezeeExchange(ExchangePyBase):
 
     async def stop_network(self):
         await super().stop_network()
+        if self._delegation is not None:
+            self._delegation.stop()
         # Tx lookups and halt cancels are restarted from the saved state by the next status update.
         self._order_batcher.stop()
         if self._pool_refresh_task is not None:
@@ -1457,6 +1479,10 @@ class BeezeeExchange(ExchangePyBase):
         self._tx_fetch_tasks.clear()
 
     async def _status_polling_loop_fetch_updates(self):
+        delegation = self._build_delegation()
+        if delegation is not None:
+            # Before the connector reports ready, then every 5 minutes (and once after a refusal, see the delegation).
+            await delegation.check_if_due()
         await super()._status_polling_loop_fetch_updates()
         await self._update_halted_denoms_if_due()
         self._cancel_open_orders_on_halted_pairs()
