@@ -127,6 +127,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         data_source = Mock()
         data_source.get_trade_fees = AsyncMock(return_value={"maker": TokenAmount("BZE", Decimal("0.001")), "taker": None})
         data_source.get_all_pairs = AsyncMock(return_value={"BZE-USDC": BeezeePair(self.market.base, self.market.quote, market=self.market)})
+        data_source.get_renamed_pairs = AsyncMock(return_value={})
         self.exchange._data_source = data_source
 
         rules = await self.exchange._format_trading_rules({})
@@ -142,6 +143,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         data_source = Mock()
         data_source.get_trade_fees = AsyncMock(return_value={"maker": None, "taker": None})
         data_source.get_all_pairs = AsyncMock(return_value={"BZE-USDC": BeezeePair(self.market.base, self.market.quote, market=self.market)})
+        data_source.get_renamed_pairs = AsyncMock(return_value={})
         data_source.gas_fees_paid = Decimal("0.0042")
         self.exchange._data_source = data_source
         self.assertEqual(Decimal("0"), self.exchange.minimum_order_amount("BZE-USDC", Decimal("0.0003")))
@@ -154,8 +156,7 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Decimal("0.0042"), self.exchange.gas_fees_paid())
 
     async def test_update_balances_combines_bank_and_dust(self):
-        data_source = Mock()
-        data_source._metadata_by_denom = {}
+        data_source = self.exchange._build_data_source()
         data_source.get_balances = AsyncMock(
             return_value=[
                 {"denom": "ubze", "amount": "1000000"},
@@ -182,7 +183,6 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]
         )
-        self.exchange._data_source = data_source
 
         await self.exchange._update_balances()
 

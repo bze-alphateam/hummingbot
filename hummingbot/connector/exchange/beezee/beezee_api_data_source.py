@@ -10,6 +10,7 @@ from aiohttp import ContentTypeError
 from bidict import bidict
 
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
+from hummingbot.connector.exchange.beezee.beezee_denom_labels import BeezeeDenomLabels
 from hummingbot.connector.exchange.beezee.beezee_signer import BeezeeSigner
 from hummingbot.connector.exchange.beezee.beezee_tx import (
     build_broadcast_request,
@@ -26,14 +27,13 @@ from hummingbot.connector.exchange.beezee.beezee_tx import (
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeMarket,
     BeezeePair,
+    BeezeeToken,
     BeezeeVenueError,
     chain_amount_to_display,
     chain_price_to_display,
     display_amount_to_chain,
     display_price_to_chain,
-    market_from_data,
     parse_coin,
-    token_from_metadata,
     unique_market_symbols,
 )
 from hummingbot.core.data_type.trade_fee import TokenAmount
@@ -96,6 +96,7 @@ class BeezeeAPIDataSource:
         signer: Optional[BeezeeSigner] = None,
         gas_adjustment: Decimal = CONSTANTS.DEFAULT_GAS_ADJUSTMENT,
         rpc_endpoint: Optional[str] = None,
+        denom_labels: Optional[BeezeeDenomLabels] = None,
     ):
         self._api_factory = api_factory
         self._rest_endpoint = rest_endpoint.rstrip("/")
@@ -112,6 +113,9 @@ class BeezeeAPIDataSource:
         self._pairs_by_trading_pair: Dict[str, BeezeePair] = {}
         self._pairs_loaded = False
         self._symbol_map: Optional[bidict] = None
+        # Names the connector gave the pairs before denoms had labels, to the current name, where the two differ.
+        self._renamed_pairs: Dict[str, str] = {}
+        self._denom_labels = denom_labels or BeezeeDenomLabels()
         self._known_limit_ids = {rate_limit.limit_id for rate_limit in CONSTANTS.RATE_LIMITS}
         self._warned_missing_metadata_denoms: Set[str] = set()
         self._account_info_lock = asyncio.Lock()
@@ -133,7 +137,7 @@ class BeezeeAPIDataSource:
         """Gas fees of every tx this data source broadcast and the node accepted, in display units of the native
         token. A tx accepted at broadcast pays its fee even when its messages fail in the block."""
         metadata = self._metadata_by_denom.get(self._native_denom) or self._fallback_metadata_for_denom(self._native_denom)
-        return chain_amount_to_display(self._gas_fees_paid, token_from_metadata(self._native_denom, metadata))
+        return chain_amount_to_display(self._gas_fees_paid, self._denom_labels.token(self._native_denom, metadata))
 
     @property
     def account_address(self) -> Optional[str]:
@@ -239,13 +243,17 @@ class BeezeeAPIDataSource:
                 fees[side] = None
                 continue
             denom, amount = coin
-            metadata = self._metadata_by_denom.get(denom) or await self.get_denom_metadata(denom)
-            token = token_from_metadata(denom, metadata)
+            token = await self.get_token(denom)
             fees[side] = TokenAmount(token.symbol, chain_amount_to_display(amount, token))
         return fees
 
     async def get_halted_denoms(self) -> Set[str]:
         return set(await self._paged_request(CONSTANTS.HALTED_DENOMS_PATH_URL, "denoms"))
+
+    async def get_token(self, denom: str) -> BeezeeToken:
+        """The denom's token: its label (see beezee_denom_labels) and its decimals."""
+        metadata = self._metadata_by_denom.get(denom) or await self.get_denom_metadata(denom)
+        return self._denom_labels.token(denom, metadata)
 
     async def get_denom_metadata(self, denom: str) -> Dict[str, Any]:
         encoded_denom = quote(denom, safe="")
@@ -297,8 +305,8 @@ class BeezeeAPIDataSource:
 
         A market and a pool are unrelated on chain, so a pair is listed for each market and for each pool whose two
         denoms have no market. A market's pair keeps the market's orientation and gets the pool of the same two denoms
-        when there is one; a pool-only pair takes the pool's orientation (denoms sorted). Names come from the denoms'
-        metadata either way, markets first, so a market's pair name never changes because of a pool.
+        when there is one; a pool-only pair takes the pool's orientation (denoms sorted). Names are the denoms' labels
+        (see beezee_denom_labels), given markets first, so a market's pair name never changes because of a pool.
         """
         if self._pairs_loaded and not refresh:
             return self._pairs_by_trading_pair
@@ -316,21 +324,29 @@ class BeezeeAPIDataSource:
         for denom in {denom for denoms in market_denoms + pool_only for denom in denoms}:
             if denom not in self._metadata_by_denom:
                 self._metadata_by_denom[denom] = await self.get_denom_metadata(denom)
-        self._symbol_map = unique_market_symbols(market_denoms + pool_only, self._metadata_by_denom)
+        # Labels in pair order, so an unverified denom whose label is taken loses it the same way on every start.
+        tokens = {}
+        for denoms in market_denoms + pool_only:
+            for denom in denoms:
+                tokens[denom] = self._denom_labels.token(denom, self._metadata_by_denom[denom])
         self._markets_by_id = {
-            f"{market['base']}/{market['quote']}": market_from_data(market, self._metadata_by_denom, self._symbol_map)
-            for market in raw_markets
+            f"{base}/{quote_denom}": BeezeeMarket(market_id=f"{base}/{quote_denom}", base=tokens[base], quote=tokens[quote_denom])
+            for base, quote_denom in market_denoms
         }
         pairs: Dict[str, BeezeePair] = {}
         for market in self._markets_by_id.values():
             pool_id = pool_ids.get(frozenset((market.base.denom, market.quote.denom)))
             pairs[market.trading_pair] = BeezeePair(base=market.base, quote=market.quote, market=market, pool_id=pool_id)
         for base, quote_denom in pool_only:
-            # The tokens of a market that does not exist: only its base, quote and pair name are used.
-            tokens = market_from_data({"base": base, "quote": quote_denom}, self._metadata_by_denom, self._symbol_map)
-            pairs[tokens.trading_pair] = BeezeePair(
-                base=tokens.base, quote=tokens.quote, pool_id=pool_ids[frozenset((base, quote_denom))]
+            pairs[f"{tokens[base].symbol}-{tokens[quote_denom].symbol}"] = BeezeePair(
+                base=tokens[base], quote=tokens[quote_denom], pool_id=pool_ids[frozenset((base, quote_denom))]
             )
+        self._symbol_map = bidict({f"{pair.base.denom}/{pair.quote.denom}": name for name, pair in pairs.items()})
+        legacy_names = unique_market_symbols(market_denoms + pool_only, self._metadata_by_denom)
+        self._renamed_pairs = {
+            legacy_names[symbol]: name for symbol, name in self._symbol_map.items()
+            if legacy_names.get(symbol, name) != name and legacy_names[symbol] not in pairs
+        }
         self._pairs_by_trading_pair = pairs
         self._pairs_loaded = True
         return self._pairs_by_trading_pair
@@ -339,6 +355,12 @@ class BeezeeAPIDataSource:
         """The order-book markets by market id (base/quote denoms). Pool-only pairs are not in it."""
         await self.get_all_pairs(refresh=refresh)
         return self._markets_by_id
+
+    async def get_renamed_pairs(self) -> Dict[str, str]:
+        """The name each pair had before denoms got labels (metadata symbols only), to its name now, for the pairs
+        whose name changed. A config that still uses an old name is told the new one."""
+        await self.get_all_pairs()
+        return dict(self._renamed_pairs)
 
     async def get_symbol_map(self) -> bidict:
         """Exchange symbol (base/quote denoms, in the pair's orientation) to pair name, for every pair."""

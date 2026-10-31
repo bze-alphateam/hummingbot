@@ -14,36 +14,34 @@ controllers_config: []
 exchange: beezee
 
 # BZE quoted in USDC bridged from Injective (USDC.inj): market ubze/ibc/81DA528F…, pool ibc/81DA528F…_ubze
-# (pool fee 0.1%). USDC.inj has no display unit on chain, so the bot counts it in base units (1 = 0.000001 USDC):
-# the band, max_trade_quote, keep_quote_reserve and buy_budget_quote below are in those units.
-# Pair name: the connector names USDC.inj after its current on-chain metadata (symbol ERC20:0XA00C…, no display
-# unit). That naming is not final and may change; if the pair is reported unknown, take the current name from the
-# pair autocomplete (`create`, pick a strategy with `beezee`).
-trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+# (pool fee 0.1%). USDC.inj counts in USDC (6 decimals, from the asset list): the band, max_trade_quote,
+# keep_quote_reserve and buy_budget_quote below are in USDC.
+# Pair name: USDC.inj is labelled USDC.INJ, as on dex.getbze.com (README_BZE.md, "Denom labels").
+trading_pair: "BZE-USDC.INJ"
 
 price_source: pool
 
-# The band, in USDC.inj base units per BZE: 330 = 0.00033 USDC. Placeholders: the pool was at about 365 in October
+# The band, in USDC per BZE. Placeholders: the pool was at about 0.000365 in October
 # 2026; set them around the price you want to defend. The floor must be below the ceiling.
-floor_price: 330
-ceiling_price: 420
+floor_price: 0.00033
+ceiling_price: 0.00042
 
 venue: pool
 
-# Largest buy, in USDC.inj base units spent (20000000 = 20 USDC), and largest sell, in BZE sold.
-max_trade_quote: 20000000
+# Largest buy, in USDC spent, and largest sell, in BZE sold.
+max_trade_quote: 20
 max_trade_base: 50000
 
 # A trade's own price impact, pool fee (0.1%) included, in %.
 max_impact_pct: 1
 
-# Balances the script never spends: USDC.inj (base units), then BZE. Hold BZE above keep_base_reserve for the fees
+# Balances the script never spends: USDC.inj, then BZE. Hold BZE above keep_base_reserve for the fees
 # too: every trade pays 0.1 BZE taker fee + gas in BZE, also the buys.
 keep_quote_reserve: 0
 keep_base_reserve: 1000
 
-# Per UTC day: USDC.inj base units all buys may spend (100000000 = 100 USDC) and BZE all sells may sell.
-buy_budget_quote: 100000000
+# Per UTC day: USDC all buys may spend and BZE all sells may sell.
+buy_budget_quote: 100
 sell_budget_base: 300000
 budget_period: daily
 

@@ -15,13 +15,13 @@ exchange: beezee
 
 # BZE quoted in USDC bridged from Injective (USDC.inj), market id
 #   ubze/ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838
-# The chain's metadata gives USDC.inj no display unit, so the bot counts it in base units (1 = 0.000001 USDC) and
-# quotes BZE at about 333 of them (0.000333 USDC). Volumes below are in the same units.
-trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+# USDC.inj counts in USDC (6 decimals, from the asset list), so BZE quotes at about 0.000333. Volumes below are in
+# USDC. Pair name: USDC.inj is labelled USDC.INJ, as on dex.getbze.com (README_BZE.md, "Denom labels").
+trading_pair: "BZE-USDC.INJ"
 
-# Volume to print per UTC day, in USDC.inj base units: 20000000 = 20 USDC. A self-filled trade counts once.
+# Volume to print per UTC day, in USDC. A self-filled trade counts once.
 # Placeholder: set your own target.
-daily_volume_quote: 20000000
+daily_volume_quote: 20
 
 # One self-filled trade per cycle. 300 s = 288 cycles a day.
 cycle_seconds: 300
@@ -46,8 +46,8 @@ coingecko_id_base: bzedge
 coingecko_id_quote: usd-coin
 exclude_markets:
   - BeeZee DEX
-# CoinGecko gives USDC per BZE; the bot counts USDC.inj in base units, so x 1000000.
-anchor_price_scale: 1000000
+# CoinGecko gives USDC per BZE, the same unit the bot counts BZE/USDC.inj in.
+anchor_price_scale: 1
 # 300 s fits the public API's rate limit (two requests per refresh).
 anchor_refresh_seconds: 300
 anchor_max_age_seconds: 1800

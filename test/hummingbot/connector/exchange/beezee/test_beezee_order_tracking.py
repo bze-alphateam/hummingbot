@@ -143,6 +143,8 @@ class BeezeeChainTestCase(unittest.IsolatedAsyncioTestCase):
             connector="beezee",
             network=BeezeeCustomNetworkMode(rest_endpoint=REST_URL, rpc_endpoint=RPC_URL, chain_id="beezee-1"),
             account_type=BeezeeMnemonicWalletAccountMode(mnemonic=TEST_MNEMONIC),
+            # The harness names its test tokens USDC and TKN; on beezee-1 the asset list would call them USDC.INJ and OSMO.
+            denom_labels={USDC: "USDC", TKN: "TKN"},
             **self.config_overrides,
         )
         self.exchange = BeezeeExchange(connector_configuration=config, trading_pairs=self.trading_pairs)

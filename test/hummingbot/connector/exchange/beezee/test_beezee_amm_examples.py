@@ -14,8 +14,8 @@ CONF = Path(__file__).resolve().parents[5] / "conf"
 
 # Every AMM script and controller ships a testnet config, a BZE/USDC.inj mainnet config and a TOKEN/BZE template.
 FLAVOUR_PAIRS = {
-    "mainnet": "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A",
-    "testnet": "TUSDC-BZE",
+    "mainnet": "BZE-USDC.INJ",
+    "testnet": "TBZE-TUSDC",
     "token_bze": "TOKEN-BZE",
 }
 AMM_CONFIGS = {
@@ -43,7 +43,9 @@ class AmmExampleTests(unittest.TestCase):
                     self.assertEqual(set(), set(data) - set(config_class.model_fields), "keys the config does not know")
                     config = config_class(**data)
                     self.assertEqual(pair, config.trading_pair)
-                    self.assertIn("BZE", config.trading_pair.split("-"), "the fees and the gas are paid in BZE")
+                    # Testnet BZE is labelled TBZE, as on testnet-dex.
+                    native = "TBZE" if flavour == "testnet" else "BZE"
+                    self.assertIn(native, config.trading_pair.split("-"), "the fees and the gas are paid in BZE")
                     self.assertEqual("beezee", data.get("exchange", data.get("connector_name")))
                     if folder.name == "scripts":
                         self.assertEqual(f"{name}.py", config.script_file_name)
