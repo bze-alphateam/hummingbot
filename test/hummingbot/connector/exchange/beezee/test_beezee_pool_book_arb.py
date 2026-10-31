@@ -606,11 +606,17 @@ class BeezeePoolBookArbTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("arb refused up front: not enough BZE for the swap", strategy._last_skip_reason)
         self.assertFalse(strategy._halted)
 
-    async def test_no_pool_or_an_empty_pool_skips(self):
-        self.connector.pool = None
-        strategy = self._strategy()
+    async def test_a_pool_not_loaded_yet_waits_without_a_skip(self):
+        # Right after a start the pair has the pool venue but the connector has not read the pool yet.
+        self.connector.asks = [(Decimal("0.98"), Decimal("1000"))]
+        pool, self.connector.pool = self.connector.pool, None
+        strategy = self._strategy(slippage_pct=Decimal("0.7"))
         self._run(2)
-        self.assertEqual("TOKEN-BZE has no liquidity pool", strategy._last_skip_reason)
+        self.assertIsNone(strategy._last_skip_reason)
+        self.assertEqual([], self.connector.sent)
+        self.connector.pool = pool
+        self._run(1)
+        self.assertEqual(1, len(self.connector.sent))
 
     # === Example ===
 

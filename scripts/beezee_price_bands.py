@@ -12,7 +12,13 @@ from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.exchange.beezee.beezee_amm import BeezeeSwapError
 from hummingbot.connector.exchange.beezee.beezee_fills import BeezeeFillError
 from hummingbot.connector.exchange.beezee.beezee_pool_price_delegate import BeezeePoolPriceDelegate
-from hummingbot.connector.exchange.beezee.beezee_utils import VENUE_BOOK, VENUE_POOL, describe_venues, venue_refusal
+from hummingbot.connector.exchange.beezee.beezee_utils import (
+    VENUE_BOOK,
+    VENUE_POOL,
+    describe_venues,
+    pool_not_loaded,
+    venue_refusal,
+)
 from hummingbot.core.data_type.common import MarketDict, OrderType, PriceType, TradeType
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
@@ -201,7 +207,7 @@ class BeezeePriceBands(StrategyV2Base):
 
     def on_tick(self):
         self._roll_day()
-        if self._refused is not None or self._halted is not None or not self._check_start():
+        if self._refused is not None or self._halted is not None or not self._check_start() or self._pool_loading():
             return
         blocks = self.connector.new_blocks_seen
         if blocks == self._last_block_seen and self.current_timestamp < self._next_check_timestamp:
@@ -247,6 +253,12 @@ class BeezeePriceBands(StrategyV2Base):
         self._native = native
         self._started = True
         return True
+
+    def _pool_loading(self) -> bool:
+        """Whether the pool the config trades or prices on is not loaded yet (see pool_not_loaded). Only a `venue: book`
+        band priced on the book mid does without it."""
+        uses_pool = self.config.venue != BOOK or self.config.price_source != BOOK_MID
+        return uses_pool and pool_not_loaded(self.connector, self.pair)
 
     def _venue_refusal(self) -> Optional[str]:
         config = self.config

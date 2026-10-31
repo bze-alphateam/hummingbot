@@ -10,7 +10,12 @@ from pydantic import Field
 
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.exchange.beezee.beezee_amm import BeezeeSwapError, BeezeeSwapRequest, BeezeeSwapResult
-from hummingbot.connector.exchange.beezee.beezee_utils import VENUE_POOL, describe_venues, venue_refusal
+from hummingbot.connector.exchange.beezee.beezee_utils import (
+    VENUE_POOL,
+    describe_venues,
+    pool_not_loaded,
+    venue_refusal,
+)
 from hummingbot.core.data_type.common import MarketDict, OrderType, TradeType
 from hummingbot.core.event.events import BuyOrderCompletedEvent, MarketOrderFailureEvent, SellOrderCompletedEvent
 from hummingbot.strategy.strategy_v2_base import StrategyV2Base, StrategyV2ConfigBase
@@ -136,7 +141,7 @@ class BeezeePoolVolume(StrategyV2Base):
         self._roll_day()
         if self._refused is not None or not self._check_pair():
             return
-        if self.current_timestamp < self._next_cycle_timestamp:
+        if self.current_timestamp < self._next_cycle_timestamp or pool_not_loaded(self.connector, self.pair):
             return
         self._next_cycle_timestamp = self.current_timestamp + self.config.cycle_seconds
         skip_reason = self._run_cycle()
