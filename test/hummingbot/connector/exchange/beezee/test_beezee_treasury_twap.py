@@ -135,6 +135,32 @@ class BeezeeTreasuryTwapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Decimal("200"), strategy._done_base)
         self.assertEqual(Decimal("1000"), strategy.remaining)
 
+    async def test_a_pool_not_loaded_yet_delays_the_start_without_skipping_slice_1(self):
+        # Right after a start the pair has the pool venue but the connector has not read the pool yet.
+        pool, self.connector.pool = self.connector.pool, None
+        strategy = self._strategy()
+        self._start()
+        self.assertEqual([], self.connector.swaps)
+        self.assertEqual(0, sum(strategy._skips.values()))
+        self.assertFalse(strategy._started)
+        self.connector.pool = pool
+        self._run(1)
+        self.assertEqual([Decimal("100")], self._swapped())
+        self.assertEqual(0, sum(strategy._skips.values()))
+
+    async def test_slices_that_pass_while_the_pool_is_not_loaded_are_skipped_for_that_reason(self):
+        strategy = self._strategy()
+        self._start()
+        self._settle_last_swap()
+        pool, self.connector.pool = self.connector.pool, None
+        self._next_slice()
+        self._next_slice()
+        self.assertEqual(0, sum(strategy._skips.values()))
+        self.connector.pool = pool
+        self._run(1)
+        self.assertEqual({"the liquidity pool was not loaded yet": 1}, dict(strategy._skips))
+        self.assertEqual(2, len(self.connector.swaps))
+
     async def test_the_run_completes_and_stops(self):
         strategy = self._strategy(total_amount=Decimal("1000"))
         self._start()

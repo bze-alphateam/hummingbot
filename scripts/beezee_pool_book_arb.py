@@ -11,7 +11,13 @@ from pydantic import Field
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.exchange.beezee.beezee_amm import BeezeeSwapError, BeezeeSwapRequest
 from hummingbot.connector.exchange.beezee.beezee_fills import BeezeeFillError
-from hummingbot.connector.exchange.beezee.beezee_utils import VENUE_BOOK, VENUE_POOL, describe_venues, venue_refusal
+from hummingbot.connector.exchange.beezee.beezee_utils import (
+    VENUE_BOOK,
+    VENUE_POOL,
+    describe_venues,
+    pool_not_loaded,
+    venue_refusal,
+)
 from hummingbot.core.data_type.common import MarketDict, OrderType, TradeType
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
@@ -175,7 +181,7 @@ class BeezeePoolBookArb(StrategyV2Base):
 
     def on_tick(self):
         self._roll_day()
-        if self._refused is not None or not self._check_pair():
+        if self._refused is not None or not self._check_pair() or pool_not_loaded(self.connector, self.pair):
             return
         blocks = self.connector.new_blocks_seen
         if blocks == self._last_block_seen and self.current_timestamp < self._next_check_timestamp:

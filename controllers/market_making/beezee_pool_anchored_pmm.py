@@ -7,7 +7,12 @@ from pydantic import Field
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.exchange.beezee.beezee_amm import BeezeeSwapError
 from hummingbot.connector.exchange.beezee.beezee_pool_price_delegate import BeezeePoolPriceDelegate
-from hummingbot.connector.exchange.beezee.beezee_utils import VENUE_BOOK, describe_venues, venue_refusal
+from hummingbot.connector.exchange.beezee.beezee_utils import (
+    VENUE_BOOK,
+    describe_venues,
+    pool_not_loaded,
+    venue_refusal,
+)
 from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
 from hummingbot.strategy_v2.controllers.market_making_controller_base import (
     MarketMakingControllerBase,
@@ -129,7 +134,8 @@ class BeezeePoolAnchoredPMM(MarketMakingControllerBase):
 
     async def update_processed_data(self):
         pair = self.config.trading_pair
-        if not self._check_venue():
+        if not self._check_venue() or pool_not_loaded(self.connector, pair):
+            # Refused, or the pool is not loaded yet: quote nothing rather than around the book mid "without a pool".
             self.processed_data = {"reference_price": None, "spread_multiplier": Decimal("1"), "price_source": None,
                                    "pool_fee": Decimal("0"), "min_spread": Decimal("0")}
             return

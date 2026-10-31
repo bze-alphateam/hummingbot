@@ -12,7 +12,12 @@ from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.exchange.beezee.beezee_amm import BeezeeSwapError
 from hummingbot.connector.exchange.beezee.beezee_fills import BeezeeFillError
 from hummingbot.connector.exchange.beezee.beezee_pool_price_delegate import BeezeePoolPriceDelegate
-from hummingbot.connector.exchange.beezee.beezee_utils import VENUE_POOL, describe_venues, venue_refusal
+from hummingbot.connector.exchange.beezee.beezee_utils import (
+    VENUE_POOL,
+    describe_venues,
+    pool_not_loaded,
+    venue_refusal,
+)
 from hummingbot.core.data_type.common import MarketDict, OrderType, PriceType, TradeType
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
@@ -154,6 +159,8 @@ class BeezeeTreasuryTwap(StrategyV2Base):
         self._slices_traded: Counter = Counter()
         self._skips: Counter = Counter()
         self._last_skip: Optional[str] = None
+        # Set while the pool is still loading, so the slices that passed meanwhile are skipped for that reason.
+        self._waited_for_pool = False
         self._reference_sum = Decimal("0")
         self._reference_samples = 0
         self._tradebin_fees = Decimal("0")
@@ -194,7 +201,13 @@ class BeezeeTreasuryTwap(StrategyV2Base):
     # === Clock ===
 
     def on_tick(self):
-        if self._refused is not None or self._finished is not None or not self._check_start():
+        if self._refused is not None or self._finished is not None:
+            return
+        if self.config.venue != BOOK and pool_not_loaded(self.connector, self.pair):
+            # Before the start the clock does not run yet; after it, the slices that pass are skipped once it loads.
+            self._waited_for_pool = self._started
+            return
+        if not self._check_start():
             return
         if self._pending is not None:
             return
@@ -207,8 +220,12 @@ class BeezeeTreasuryTwap(StrategyV2Base):
         index = int((self.current_timestamp - self._start_timestamp) // self.config.slice_interval_seconds)
         if index < self._next_slice:
             return
+        why_missed = (
+            "the liquidity pool was not loaded yet" if self._waited_for_pool else "the slice before was still settling"
+        )
+        self._waited_for_pool = False
         for missed in range(self._next_slice, index):
-            self._skip(self.slice_size(missed), "the slice before was still settling")
+            self._skip(self.slice_size(missed), why_missed)
         self._next_slice = index + 1
         self._run_slice(index)
 

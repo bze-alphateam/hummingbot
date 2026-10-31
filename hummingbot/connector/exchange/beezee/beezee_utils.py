@@ -149,6 +149,12 @@ def venue_refusal(connector: Any, trading_pair: str, needed: Sequence[str], user
     return f"{trading_pair} has no {lacks} (venues: {describe_venues(venues)}); {user} needs {wants}"
 
 
+def pool_not_loaded(connector: Any, trading_pair: str) -> bool:
+    """True while the pair has a liquidity pool but the connector has not read it yet (right after a start, before the
+    first pool refresh). A script then waits: it neither uses up a slice or a cycle nor says the pair has no pool."""
+    return VENUE_POOL in tuple(connector.trading_pair_venues(trading_pair)) and connector.get_pool(trading_pair) is None
+
+
 def safe_symbol(symbol: str, denom: str) -> str:
     cleaned = (symbol or "").strip().upper()
     if cleaned:

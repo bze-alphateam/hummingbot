@@ -213,6 +213,20 @@ class QuoteTests(BeezeePoolAnchoredPMMTestCase):
         self.assertEqual(4, len([action for action in actions if isinstance(action, CreateExecutorAction)]))
         self.assertIn("venues: order book + pool", self.controller.to_format_status()[0])
 
+    async def test_it_waits_while_the_pool_is_not_loaded(self):
+        # Right after a start the pair has the pool venue but the connector has not read the pool yet: no quotes
+        # around the book mid "without a pool", no warning.
+        pool, self.connector.pool = self.connector.pool, None
+        self.book_mid = Decimal("0.0004")
+        self.make()
+        self.assertEqual([], await self.tick())
+        self.assertIsNone(self.controller.processed_data["reference_price"])
+        self.assertEqual([], self.logged("warning"))
+        self.connector.pool = pool
+        actions = await self.tick()
+        self.assertEqual(POOL, self.controller.processed_data["price_source"])
+        self.assertEqual(4, len([action for action in actions if isinstance(action, CreateExecutorAction)]))
+
     async def test_no_pool_and_no_book_mid_quotes_nothing(self):
         self.connector.pool = None
         self.make()

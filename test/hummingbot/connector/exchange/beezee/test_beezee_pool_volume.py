@@ -411,11 +411,18 @@ class BeezeePoolVolumeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("pool halted", strategy._last_skip_reason)
         self.assertTrue(strategy._halted)
 
-    async def test_no_pool_skips(self):
-        self.connector.pool = None
+    async def test_a_pool_not_loaded_yet_waits_without_using_up_a_cycle(self):
+        # Right after a start the pair has the pool venue but the connector has not read the pool yet: the first
+        # cycle waits for it instead of being skipped as "no liquidity pool" until the next cycle_seconds.
+        pool, self.connector.pool = self.connector.pool, None
         strategy = self._strategy()
         self._run(2)
-        self.assertEqual("TOKEN-BZE has no liquidity pool", strategy._last_skip_reason)
+        self.assertIsNone(strategy._last_skip_reason)
+        self.assertEqual([], self.connector.sent)
+        self.connector.pool = pool
+        self._run(1)
+        self.assertEqual(1, len(self.connector.sent))
+        self.assertIsNone(strategy._last_skip_reason)
 
     async def test_it_runs_on_a_pool_with_or_without_an_order_book_market(self):
         for venues in (("pool",), ("book", "pool")):

@@ -275,7 +275,14 @@ The connector reads the tradebin liquidity pools (AMM) of the pairs it trades. N
   pair's own orientation.
 - **Refresh.** All pools are read once, then the pools of the traded pairs on every new block. A failed read keeps
   the last reserves and logs a warning. A pool is halted while either of its denoms is in the halted list (the same
-  list the order book uses).
+  list the order book uses). When a traded pair has a pool, the connector is not `ready` (status flag
+  `pools_initialized`) until that first read is done, so a script's first tick finds the pool. A script that still
+  sees a pair with the pool venue but no pool yet waits: it uses up no slice or cycle and does not report "no
+  liquidity pool".
+- **Prices of a pool-only pair.** Its order book is always empty, so the connector answers every price type (best
+  bid and ask, mid, last trade) with the pool price, or `None` while the pool has none. The rate oracle behind
+  `history`, the trade monitor and the fee conversions then prices the pair from its pool. A pair with an order-book
+  market keeps its book prices.
 - **Pool price.** `connector.get_pool_price(trading_pair)` is the pool's quote reserve over its base reserve, in the
   units of the pair's order prices (display units, quote per base), so it compares directly with the book. `None`
   when there is no pool or it is empty. `connector.get_pool(trading_pair)` gives the pool itself (reserves in base
@@ -308,9 +315,10 @@ The connector reads the tradebin liquidity pools (AMM) of the pairs it trades. N
     or an available balance too low for the input plus the taker fee (in BZE).
   - *Tracked as taker trades.* Each swap is a market order with its own client order id: created once its tx is
     accepted, then one fill and completed as soon as the tx is found (swaps settle inside their tx, no order queue).
-    The fill is read from the swap's `SwapEvent`: price in the pair's order-price units (quote per base), amounts
-    before the pool fee, and fees = the pool fee (in the input token) + the tradebin taker fee (0.1 BZE on mainnet,
-    read from the chain params, once per swap). So `OrderFilledEvent`, the trade history and PnL treat a swap like an
+    The fill is read from the swap's `SwapEvent`: price in the pair's order-price units (quote per base), the input
+    amount net of the pool fee (what the pool swapped: a 2 TUSDC sell is recorded as 1.996 TUSDC), and fees = the
+    pool fee (in the input token, shown separately as a flat fee) + the tradebin taker fee (0.1 BZE on mainnet, read
+    from the chain params, once per swap). So `OrderFilledEvent`, the trade history and PnL treat a swap like an
     order fill. The balances change by the event's amounts at once, and the pool is read again from the chain (part
     of the fee stays in the pool, so its new reserves are never guessed). `connector.get_swap_result(order_id)` gives
     what a settled swap put in and got out.
@@ -449,6 +457,9 @@ price, the day's cost split (pool fees, taker fees, gas) against the cap, the co
 inventory drift from the swaps and the last skip reason. The counters live in memory: a restart starts the day's
 volume and spend from zero.
 
+`Inventory drift` already includes the pool fees (they come out of the swapped amounts), so do not add it to
+`Cost today`, which lists them too: the wallet's change over the day is the drift + the taker fees + the gas.
+
 **Cost.** A round trip costs 2 × the pool fee on its size (to the LPs) + 2 × the tradebin taker fee + gas. The pool
 fee scales with the volume, the rest is fixed per round trip, so fewer, larger cycles are cheaper. A bot owner who is
 also an LP in that pool gets their share of the pool fee back. Example on BZE/USDC.inj (pool fee 0.1%, taker fee
@@ -581,8 +592,8 @@ On every new block (and at least every `check_interval_seconds`):
 6. **Budgets.** `budget_period: daily` (default) starts both budgets again at UTC midnight; `total` covers the whole
    run. A side whose budget is spent stops for the period and `status` says so. A failed trade spends nothing.
 7. **Sanity.** The script refuses to start when `floor_price >= ceiling_price` or a kept reserve is larger than its
-   balance. A halted pair (the pool's halted flag, or a refusal saying so) stops it, logged once; restart it once the
-   halt is lifted.
+   balance. A halted pair (the pool's halted flag, or a refusal saying so) stops it, logged once; once the halt is
+   lifted, `stop` and `start` it again.
 
 `status` shows the reference price against the band, the budget used and left per side and period, the reserves
 kept, today's buys and sells with their average price, the tradebin fees, gas and pool fees, a trade in flight and the
@@ -642,7 +653,8 @@ Every slice:
    against the reference TWAP (the pool price, or the book mid without a pool, sampled at every slice), the tradebin
    fees, the gas and the pool fees. When one entry of a book slice fails, the entries that filled still count.
 6. **End.** At completion, at the deadline (after a slice still in flight settles) or on a halted pair, the script
-   stops and logs a summary. Whatever is left is reported, never forced through.
+   stops and logs a summary. Whatever is left is reported, never forced through. Run `stop` before starting it again
+   (see "Stopping safely").
 
 `status` shows the progress (done / total and the % of time elapsed), the next slice's size and the venue it would
 take, the average execution price against the reference TWAP, the skipped slices with their reasons, the fees and gas,
@@ -765,9 +777,14 @@ bot's included; the arb script would take the controller's own quotes). Give eve
 ### Stopping safely
 
 - **Wait for the in-flight trade.** `status` shows a swap, arb, hedge or slice in flight. `stop` while nothing is in
-  flight. A stop (or kill) during a broadcast leaves that swap FAILED after the restart, even though its tx may still
-  land: check the wallet's last txs in the explorer before trusting the counters. The balances are read from the
-  chain, so they are right either way.
+  flight. A swap interrupted after its tx was broadcast is adopted on restart (`Adopted restored order …`) and settles
+  from its tx: FILLED when the tx landed, FAILED when it failed or is never found. Only a swap stopped before its tx
+  was accepted always ends FAILED, since whether it was sent is unknown. An adopted swap is not counted in the
+  restarted script's volume or spend (its counters start from zero): check the wallet's last txs in the explorer
+  before trusting the counters. The balances are read from the chain, so they are right either way.
+- **After a script stops itself** (TWAP `stopped: completed` or at its deadline, bands or TWAP on a halt), the client
+  still holds it as the running strategy. Run `stop` before the next `start`: otherwise `start` only answers
+  "Invalid strategy. Start aborted."
 - **Resting orders.** Only the controller rests orders; `stop` cancels them. Afterwards check in the dex app that the
   wallet has no order left on the book, and cancel any leftover there. The scripts hold no resting orders: swaps settle
   in their tx and taker fills are refunded at the end of their block.
@@ -797,6 +814,9 @@ bot's included; the arb script would take the controller's own quotes). Give eve
   pool with the pool-anchored controller.
 - **A fill that matches nothing still pays the 0.1 BZE taker fee**, but no trade carries it: the balances are right
   (read from the chain), while the PnL and the trade history miss that fee.
+- **Pool swaps in `history`.** A swap's trade holds the input amount net of the pool fee, with the pool fee shown
+  separately as a flat fee in the input token: a 2 TUSDC sell shows as 1.996 TUSDC plus a 0.004 TUSDC fee. The
+  balances are exact.
 - **Arbitrage.** Its state (an arb in flight, open imbalances, the counters) is in memory only. When it buys on the pool
   and sells into bids, the swap may deliver up to `slippage_pct` less base than the fill sold; that drift is not
   recorded as an imbalance, it only shows in the balances.
@@ -804,7 +824,8 @@ bot's included; the arb script would take the controller's own quotes). Give eve
   still refuses orders on a halted denom, but the controller keeps trying.
 - **Pool volume.** A halted pool pauses the script and it resumes by itself once the halt is lifted. If a round trip's
   completion is ever missed, the next ones wait behind it until a restart.
-- **Bands and TWAP.** A halt stops them; restart once it is lifted.
+- **Bands and TWAP.** A halt stops them; once it is lifted, `stop` and then `start` them again (a `start` without
+  the `stop` is refused with "Invalid strategy. Start aborted.").
 - **TWAP.** With `catch_up: false`, a part the book refunded still stays in what is left and is traded later. Once
   nothing is left, the remaining slices log a "nothing left" skip until the deadline.
 - **USDC.inj pair name.** On mainnet the connector names USDC.inj after its on-chain metadata, so BZE/USDC.inj lists as

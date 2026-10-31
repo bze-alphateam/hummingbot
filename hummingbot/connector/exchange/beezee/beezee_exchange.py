@@ -61,7 +61,7 @@ from hummingbot.connector.exchange.beezee.beezee_utils import (
 from hummingbot.connector.exchange_py_base import ExchangePyBase
 from hummingbot.connector.trading_rule import TradingRule
 from hummingbot.connector.utils import get_new_client_order_id
-from hummingbot.core.data_type.common import OrderType, TradeType
+from hummingbot.core.data_type.common import OrderType, PriceType, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState, OrderUpdate, TradeUpdate
 from hummingbot.core.data_type.limit_order import LimitOrder
 from hummingbot.core.data_type.order_book_tracker_data_source import OrderBookTrackerDataSource
@@ -314,6 +314,7 @@ class BeezeeExchange(ExchangePyBase):
         status = super().status_dict
         status["user_stream_initialized"] = True
         status["symbols_mapping_initialized"] = True
+        status["pools_initialized"] = self._pools_initialized()
         if not all(status.values()):
             now = time.time()
             if now - self._last_status_log_timestamp >= 30.0:
@@ -325,6 +326,15 @@ class BeezeeExchange(ExchangePyBase):
     @property
     def ready(self) -> bool:
         return all(self.status_dict.values())
+
+    def _pools_initialized(self) -> bool:
+        """False until the first pool refresh completes, when a traded pair has a liquidity pool: the pools are read in
+        the background on each new block, and the first tick after ready must find them (a script would read a missing
+        pool as a pair without one). Pairs without a pool never wait."""
+        traded = set(self._trading_pairs or [])
+        if not any(pair.has_pool for name, pair in self._pairs_by_trading_pair.items() if name in traded):
+            return True
+        return self._pool_tracker is not None and self._pool_tracker.loaded
 
     def gas_fees_paid(self) -> Decimal:
         """Gas fees of every tx this connector broadcast since it started, in the native token (BZE)."""
@@ -360,6 +370,9 @@ class BeezeeExchange(ExchangePyBase):
         has_book = pair is not None and pair.has_book
         has_pool = (pair is not None and pair.has_pool) or self._build_pool_tracker().get_pool(trading_pair) is not None
         return tuple(venue for venue, present in ((VENUE_BOOK, has_book), (VENUE_POOL, has_pool)) if present)
+
+    def _is_pool_only(self, trading_pair: str) -> bool:
+        return self.trading_pair_venues(trading_pair) == (VENUE_POOL,)
 
     def _check_book_venue(self, trading_pair: str, action: str):
         """Raises BeezeeVenueError for a known pair with no order-book market, before anything is tracked or sent."""
@@ -439,6 +452,34 @@ class BeezeeExchange(ExchangePyBase):
     def quote_input_for_output(self, trading_pair: str, side: str, amount: Decimal) -> BeezeeSwapQuote:
         """The swap that receives at least `amount` of the output token: base on a "buy", quote on a "sell"."""
         return self._build_pool_tracker().quote_input_for_output(trading_pair, side, amount)
+
+    # === Prices ===
+    #
+    # A pool-only pair's order book is always empty, so its book prices are NaN, and the rate oracle (behind `history`,
+    # the trade monitor and the fee conversion) raises on an ordered comparison with NaN. Such a pair answers every
+    # price type with its pool price (a pool has no spread), or None while it has none: the rate oracle and the
+    # performance metrics skip None (they fall back to the trade price). A pair with an order-book market keeps the
+    # book prices.
+
+    def get_price_by_type(self, trading_pair: str, price_type: PriceType) -> Optional[Decimal]:
+        if self._is_pool_only(trading_pair):
+            return self.get_pool_price(trading_pair)
+        return super().get_price_by_type(trading_pair, price_type)
+
+    def get_price(self, trading_pair: str, is_buy: bool) -> Optional[Decimal]:
+        if self._is_pool_only(trading_pair):
+            return self.get_pool_price(trading_pair)
+        return super().get_price(trading_pair, is_buy)
+
+    def get_mid_price(self, trading_pair: str) -> Optional[Decimal]:
+        if self._is_pool_only(trading_pair):
+            return self.get_pool_price(trading_pair)
+        return super().get_mid_price(trading_pair)
+
+    async def _get_last_traded_price(self, trading_pair: str) -> float:
+        """The pool price of a pool-only pair, else the market's last trade; NaN when there is none."""
+        prices = await self._orderbook_ds.get_last_traded_prices([trading_pair])
+        return prices[trading_pair]
 
     # === Pool swaps ===
     #
