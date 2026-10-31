@@ -6,7 +6,10 @@ This connector integrates Beezee DEX spot markets through the Beezee chain `trad
 
 - Pair discovery from `/bze/tradebin/all_markets` and `/bze/tradebin/all_liquidity_pools`: a pair has an order-book
   market, a liquidity pool, or both (the two are unrelated on chain)
-- Trading rule synthesis from denom metadata and `tradebin` params
+- Readable denom labels as on the BeeZee dapps: the `denom_labels` config override, then the chain-registry asset
+  list (`beezee_denom_labels.py`), then the bank metadata; labels are unique per chain (see `README_BZE.md`, "Denom
+  labels")
+- Trading rule synthesis from those labels' decimals and `tradebin` params
 - Order book snapshots
 - Block-driven polling diffs and public trade updates
 - Bank balances and Beezee dust balances

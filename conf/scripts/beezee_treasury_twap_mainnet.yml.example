@@ -14,12 +14,10 @@ controllers_config: []
 exchange: beezee
 
 # BZE quoted in USDC bridged from Injective (USDC.inj): market ubze/ibc/81DA528F…, pool ibc/81DA528F…_ubze
-# (pool fee 0.1%). USDC.inj has no display unit on chain, so the bot counts it in base units (1 = 0.000001 USDC):
-# limit_price and keep_quote_reserve below are in those units.
-# Pair name: the connector names USDC.inj after its current on-chain metadata (symbol ERC20:0XA00C…, no display
-# unit). That naming is not final and may change; if the pair is reported unknown, take the current name from the
-# pair autocomplete (`create`, pick a strategy with `beezee`).
-trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+# (pool fee 0.1%). USDC.inj counts in USDC (6 decimals, from the asset list): limit_price and keep_quote_reserve
+# below are in USDC.
+# Pair name: USDC.inj is labelled USDC.INJ, as on dex.getbze.com (README_BZE.md, "Denom labels").
+trading_pair: "BZE-USDC.INJ"
 
 # "buy" buys BZE back with USDC.inj, "sell" sells BZE for USDC.inj.
 side: buy
@@ -33,13 +31,13 @@ slice_interval_seconds: 600
 
 max_impact_pct: 0.5
 
-# Never buy above this price, in USDC.inj base units per BZE (450 = 0.00045 USDC). Placeholder; empty = no limit.
-limit_price: 450
+# Never buy above this price, in USDC per BZE. Placeholder; empty = no limit.
+limit_price: 0.00045
 
 venue: best
 slippage_pct: 0.5
 
-# Balances the script never spends: USDC.inj (base units), then BZE. A buy spends USDC.inj but pays its fees in BZE,
+# Balances the script never spends: USDC.inj, then BZE. A buy spends USDC.inj but pays its fees in BZE,
 # so keep about 110 BZE free for this run's fees (below).
 keep_quote_reserve: 0
 keep_base_reserve: 0

@@ -13,10 +13,9 @@ exchange: beezee
 
 # BZE quoted in USDC bridged from Injective (USDC.inj), market id
 #   ubze/ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838
-# The connector names pairs from the chain's denom metadata. That metadata gives USDC.inj the symbol below and no
-# display unit, so the bot counts it in base units (1 = 0.000001 USDC) and quotes BZE at about 333 of them
-# (0.000333 USDC). USDC.n (ibc/6490A7EA...) lists as BZE-UUSDC: do not pick it.
-market: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+# The connector labels denoms as dex.getbze.com does (README_BZE.md, "Denom labels"): USDC.inj is USDC.INJ, in
+# USDC (6 decimals), so BZE quotes at about 0.000333. USDC.n (ibc/6490A7EA...) lists as BZE-USDC.N: do not pick it.
+market: "BZE-USDC.INJ"
 
 bid_spread: 1.0
 ask_spread: 1.0

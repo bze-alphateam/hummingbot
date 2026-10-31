@@ -30,6 +30,7 @@ from hummingbot.connector.exchange.beezee.beezee_api_data_source import (
 from hummingbot.connector.exchange.beezee.beezee_api_order_book_data_source import BeezeeAPIOrderBookDataSource
 from hummingbot.connector.exchange.beezee.beezee_api_user_stream_data_source import BeezeeAPIUserStreamDataSource
 from hummingbot.connector.exchange.beezee.beezee_auth import BeezeeAuth
+from hummingbot.connector.exchange.beezee.beezee_denom_labels import BeezeeDenomLabels
 from hummingbot.connector.exchange.beezee.beezee_events import TradebinEvent, block_tradebin_events, tx_tradebin_events
 from hummingbot.connector.exchange.beezee.beezee_fills import (
     BeezeeFillEntry,
@@ -56,7 +57,6 @@ from hummingbot.connector.exchange.beezee.beezee_utils import (
     display_price_to_chain,
     minimum_order_size_for_price,
     private_key_from_account_mode,
-    token_from_metadata,
 )
 from hummingbot.connector.exchange_py_base import ExchangePyBase
 from hummingbot.connector.trading_rule import TradingRule
@@ -203,6 +203,10 @@ class BeezeeExchange(ExchangePyBase):
         self._native_denom = network.native_denom
         self._gas_price = network.gas_price
         self._gas_adjustment = network.gas_adjustment
+        # Refuses to start when two denoms would get the same label.
+        self._denom_labels = BeezeeDenomLabels.for_chain(self._chain_id, connector_configuration.denom_labels)
+        # Traded pairs still named the way the connector named them before denom labels, to their new name.
+        self._renamed_trading_pairs: Dict[str, str] = {}
 
         self._data_source: Optional[BeezeeAPIDataSource] = None
         self._pool_tracker: Optional[BeezeePoolTracker] = None
@@ -315,6 +319,7 @@ class BeezeeExchange(ExchangePyBase):
         status["user_stream_initialized"] = True
         status["symbols_mapping_initialized"] = True
         status["pools_initialized"] = self._pools_initialized()
+        status["trading_pair_names_current"] = not self._renamed_trading_pairs
         if not all(status.values()):
             now = time.time()
             if now - self._last_status_log_timestamp >= 30.0:
@@ -419,6 +424,7 @@ class BeezeeExchange(ExchangePyBase):
                 signer=self._signer,
                 gas_adjustment=self._gas_adjustment,
                 rpc_endpoint=self._rpc_endpoint,
+                denom_labels=self._denom_labels,
             )
         return self._data_source
 
@@ -1372,6 +1378,7 @@ class BeezeeExchange(ExchangePyBase):
         self._pairs_by_trading_pair = dict(pairs)
         self._markets_by_trading_pair = {name: pair.market for name, pair in pairs.items() if pair.market is not None}
         self._trade_fees = await data_source.get_trade_fees()
+        await self._check_trading_pair_names(data_source)
         return [
             TradingRule(
                 trading_pair=name,
@@ -1387,6 +1394,21 @@ class BeezeeExchange(ExchangePyBase):
             )
             for name, pair in pairs.items()
         ]
+
+    async def _check_trading_pair_names(self, data_source: BeezeeAPIDataSource):
+        """Finds the traded pairs that still use a name from before denom labels. The connector is not ready while
+        there is one (status flag `trading_pair_names_current`), and the log says the pair's new name."""
+        renamed = await data_source.get_renamed_pairs()
+        found = {name: renamed[name] for name in self._trading_pairs or [] if name in renamed}
+        for old_name, new_name in found.items():
+            if old_name not in self._renamed_trading_pairs:
+                self.logger().error(
+                    f"Beezee pair '{old_name}' is now named '{new_name}': the connector labels denoms the way the BeeZee "
+                    f"dapps do. Replace '{old_name}' with '{new_name}' in the strategy or script config and start again. "
+                    f"Amounts and prices in a renamed token count in its display unit now (e.g. USDC, not uusdc), so "
+                    f"check them too."
+                )
+        self._renamed_trading_pairs = found
 
     async def _update_trading_fees(self):
         self._trade_fees = await self._build_data_source().get_trade_fees()
@@ -1530,14 +1552,12 @@ class BeezeeExchange(ExchangePyBase):
         totals = defaultdict(Decimal)
         available = defaultdict(Decimal)
         for balance in balances:
-            metadata = data_source._metadata_by_denom.get(balance["denom"]) or await data_source.get_denom_metadata(balance["denom"])
-            token = token_from_metadata(balance["denom"], metadata)
+            token = await data_source.get_token(balance["denom"])
             amount = Decimal(balance["amount"]) * token.quantum
             totals[token.symbol] += amount
             available[token.symbol] += amount
         for dust in dust_balances:
-            metadata = data_source._metadata_by_denom.get(dust["denom"]) or await data_source.get_denom_metadata(dust["denom"])
-            token = token_from_metadata(dust["denom"], metadata)
+            token = await data_source.get_token(dust["denom"])
             totals[token.symbol] += Decimal(dust["amount"]) * token.quantum
         self._account_balances = dict(totals)
         self._account_available_balances = dict(available)
