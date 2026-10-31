@@ -157,6 +157,10 @@ def init_logging(conf_filename: str,
         yml_source = yml_source.replace("$STRATEGY_FILE_PATH", strategy_file_path.replace(".yml", ""))
         io_stream: io.StringIO = io.StringIO(yml_source)
         config_dict: Dict = yaml_parser.load(io_stream)
+        # BZE fork: init_logging runs again on every `start`, and dictConfig disables every existing logger that the
+        # config does not name (or name an ancestor of) unless told otherwise. A logger created by an earlier start,
+        # e.g. `hummingbot.strategy_v2.runnable_base` (the V2 controllers), was silenced for the rest of the session.
+        config_dict.setdefault("disable_existing_loggers", False)
         if override_log_level is not None and "loggers" in config_dict:
             for logger in config_dict["loggers"]:
                 if logger in client_config_map.logger_override_whitelist:

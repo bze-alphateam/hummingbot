@@ -179,10 +179,13 @@ class BeezeePoolAnchoredPMM(MarketMakingControllerBase):
 
     def _book_mid(self) -> Optional[Decimal]:
         try:
-            mid = Decimal(str(self.market_data_provider.get_price_by_type(
-                self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)))
+            mid = self.market_data_provider.get_price_by_type(
+                self.config.connector_name, self.config.trading_pair, PriceType.MidPrice)
         except EnvironmentError:
             return None
+        if mid is None:
+            return None
+        mid = Decimal(str(mid))
         return None if mid.is_nan() or mid <= 0 else mid
 
     def _warn_source(self, warning: str):

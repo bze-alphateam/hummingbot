@@ -455,26 +455,34 @@ class BeezeeExchange(ExchangePyBase):
 
     # === Prices ===
     #
-    # A pool-only pair's order book is always empty, so its book prices are NaN, and the rate oracle (behind `history`,
-    # the trade monitor and the fee conversion) raises on an ordered comparison with NaN. Such a pair answers every
-    # price type with its pool price (a pool has no spread), or None while it has none: the rate oracle and the
-    # performance metrics skip None (they fall back to the trade price). A pair with an order-book market keeps the
-    # book prices.
+    # The upstream getters answer NaN for an empty side of the book, and the rate oracle (behind `history`, the trade
+    # monitor and the fee conversion) raises on an ordered comparison with NaN. These getters never answer NaN:
+    # - a pool-only pair (its book is always empty) answers every price type with its pool price (a pool has no
+    #   spread);
+    # - a pair with an order-book market answers the book price when the book has it (that side, both sides for the
+    #   mid, a trade for the last trade price), else its pool price when it has a pool. The pool price is in the
+    #   pair's orientation, whichever way the pool is oriented. The mid of a one-sided book is the pool price, never the
+    #   one side left: on a thin market that side can be far from the fair price;
+    # - None when there is neither. The rate oracle and the performance metrics skip None (they fall back to the trade
+    #   price).
 
     def get_price_by_type(self, trading_pair: str, price_type: PriceType) -> Optional[Decimal]:
         if self._is_pool_only(trading_pair):
             return self.get_pool_price(trading_pair)
-        return super().get_price_by_type(trading_pair, price_type)
+        return self._book_or_pool_price(trading_pair, super().get_price_by_type(trading_pair, price_type))
 
     def get_price(self, trading_pair: str, is_buy: bool) -> Optional[Decimal]:
         if self._is_pool_only(trading_pair):
             return self.get_pool_price(trading_pair)
-        return super().get_price(trading_pair, is_buy)
+        return self._book_or_pool_price(trading_pair, super().get_price(trading_pair, is_buy))
 
     def get_mid_price(self, trading_pair: str) -> Optional[Decimal]:
-        if self._is_pool_only(trading_pair):
-            return self.get_pool_price(trading_pair)
-        return super().get_mid_price(trading_pair)
+        return self.get_price_by_type(trading_pair, PriceType.MidPrice)
+
+    def _book_or_pool_price(self, trading_pair: str, book_price: Optional[Decimal]) -> Optional[Decimal]:
+        if book_price is not None and not Decimal(book_price).is_nan():
+            return book_price
+        return self.get_pool_price(trading_pair)
 
     async def _get_last_traded_price(self, trading_pair: str) -> float:
         """The pool price of a pool-only pair, else the market's last trade; NaN when there is none."""

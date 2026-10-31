@@ -232,6 +232,15 @@ class QuoteTests(BeezeePoolAnchoredPMMTestCase):
         self.make()
         self.assertEqual([], await self.tick())
 
+    async def test_no_pool_and_a_one_sided_book_quotes_nothing(self):
+        # The connector answers None (not NaN) for the mid of a one-sided book on a pair without a pool.
+        self.connector.venues = ("book",)
+        self.connector.pool = None
+        self.book_mid = None
+        self.make()
+        self.assertEqual([], await self.tick())
+        self.assertIsNone(self.controller.processed_data["reference_price"])
+
     async def test_without_hedge_mode_the_quotes_are_pmm_simple_position_executors(self):
         self.make()
         self.assertFalse(self.controller.config.hedge_fills_on_pool)

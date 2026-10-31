@@ -14,7 +14,7 @@ from test.hummingbot.connector.exchange.beezee.test_beezee_order_tracking import
     load_fixture,
 )
 from typing import List, Optional
-from unittest.mock import PropertyMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
 from hummingbot.connector.exchange.beezee.beezee_exchange import BeezeeExchange
@@ -26,6 +26,7 @@ from hummingbot.core.event.events import MarketEvent
 from hummingbot.strategy.asset_price_delegate import AssetPriceDelegate
 from hummingbot.strategy.market_trading_pair_tuple import MarketTradingPairTuple
 from hummingbot.strategy.pure_market_making import PureMarketMakingStrategy
+from hummingbot.strategy.strategy_v2_base import StrategyV2Base
 
 START = 1640780000
 MID = Decimal("0.0003")
@@ -235,6 +236,74 @@ class BeezeeRestartUntradedPairTests(RestartedPmmTestCase):
         self.assertEqual(["OID-ASK", "OID-BID"], self._active_ids(strategy))
         self.assertTrue(self._pmm_logged(logging.INFO, "the strategy does not trade TKN-BZE"))
         self.assertFalse(any(record.levelno >= logging.WARNING for record in self.pmm_logs))
+
+
+class IdleV2Strategy(StrategyV2Base):
+    """A V2 strategy whose own start and tick do nothing: only the strategy base's start-up runs."""
+
+    def start(self, clock: Clock, timestamp: float) -> None:
+        pass
+
+    def on_tick(self):
+        pass
+
+
+class BeezeeRestartV2ControllersTests(RestartedPmmTestCase):
+    """A V2 strategy (`v2_with_controllers`, e.g. the pool-anchored controller) restarted with the previous run's
+    quotes resting. Its controllers trade only through executors, which never own a restored order: an adopted order
+    rested at its stale price beside the controller's new quotes until `stop` (8 orders instead of 4)."""
+
+    def _restored_pair(self) -> List[InFlightOrder]:
+        return [
+            self._restored("OID-BID", BID_ID, True, self._quote(MID * Decimal("0.99"))),
+            self._restored("OID-ASK", ASK_ID, False, self._quote(MID * Decimal("1.01"))),
+        ]
+
+    def _v2(self, controllers: dict) -> StrategyV2Base:
+        with patch("asyncio.create_task", return_value=MagicMock()), \
+                patch.object(StrategyV2Base, "listen_to_executor_actions", MagicMock()), \
+                patch("hummingbot.strategy.strategy_v2_base.ExecutorOrchestrator"), \
+                patch("hummingbot.strategy.strategy_v2_base.MarketDataProvider"):
+            strategy = IdleV2Strategy({"beezee": self.exchange})
+        strategy.controllers = controllers
+        self.v2_logs: List[logging.LogRecord] = []
+        handler = logging.Handler()
+        handler.emit = self.v2_logs.append
+        StrategyV2Base.logger().addHandler(handler)
+        StrategyV2Base.logger().setLevel(logging.INFO)
+        self.addCleanup(StrategyV2Base.logger().removeHandler, handler)
+        self.clock = Clock(ClockMode.BACKTEST, 1, START, START + 3600)
+        self.clock.add_iterator(strategy)
+        return strategy
+
+    def _v2_logged(self, fragment: str) -> bool:
+        return any(record.levelno == logging.INFO and fragment in record.getMessage() for record in self.v2_logs)
+
+    async def test_restored_orders_on_the_controllers_pair_are_cancelled_at_start(self):
+        await self._restart_with(self._restored_pair())
+        strategy = self._v2({"pool_anchored": MagicMock()})
+
+        await self._tick(5)
+
+        self.assertEqual(1, len(self.node.landed))
+        cancel_tx = self.node.landed[0][1]
+        self.assertEqual(["cancel", "cancel"], cancel_tx.kinds)
+        self.assertEqual({BID_ID, ASK_ID}, {message.order_id for message in cancel_tx.messages})
+        self.assertEqual(["OID-ASK", "OID-BID"], sorted(self._event_ids(MarketEvent.OrderCancelled)))
+        self.assertEqual([], strategy.get_active_orders("beezee"))
+        self.assertEqual({}, self.node.resting)
+        self.assertTrue(self._v2_logged("Cancelling restored order OID-BID: the strategy does not adopt restored orders"))
+        self.assertFalse(self._v2_logged("Adopted restored order"))
+
+    async def test_a_simple_script_keeps_adopting_its_restored_orders(self):
+        await self._restart_with(self._restored_pair())
+        strategy = self._v2({})
+
+        await self._tick(5)
+
+        self.assertEqual([], self.node.broadcast)
+        self.assertEqual(["OID-ASK", "OID-BID"], sorted(order.client_order_id for order in strategy.get_active_orders("beezee")))
+        self.assertTrue(self._v2_logged("Adopted restored order OID-BID"))
 
 
 class BeezeeRestartFillWhileDownTests(RestartedPmmMixin, BeezeeChainTestCase):

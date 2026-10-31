@@ -626,6 +626,14 @@ class StrategyV2Base(StrategyPyBase):
     # V2-specific methods
     # -------------------------------------------------------------------------
 
+    def adopts_restored_orders(self) -> bool:
+        """
+        BZE fork: with controllers, orders are managed only through executors, and no executor owns an order restored
+        from the previous run, so an adopted one would rest at a stale price beside the controllers' new quotes until
+        `stop`. The restored orders are cancelled at start instead. A simple script keeps the adoption.
+        """
+        return not self.controllers
+
     def start(self, clock: Clock, timestamp: float) -> None:
         """
         Start the strategy.
