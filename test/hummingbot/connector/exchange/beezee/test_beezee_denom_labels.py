@@ -63,11 +63,18 @@ def make_config(chain_id: str = CONSTANTS.MAINNET_CHAIN_ID, denom_labels: Option
 class BeezeeDenomLabelTests(unittest.IsolatedAsyncioTestCase):
     """The connector against mocked REST: pair names, decimals and balances come from the denoms' labels."""
 
+    level = 0
+
     def setUp(self) -> None:
         self.mock_api = aioresponses()
         self.mock_api.start()
         self.addCleanup(self.mock_api.stop)
         self.log_records: List[logging.LogRecord] = []
+        # The labels log their own warnings (a metadata label that was taken).
+        labels_logger = BeezeeDenomLabels.logger()
+        labels_logger.setLevel(1)
+        labels_logger.addHandler(self)
+        self.addCleanup(labels_logger.removeHandler, self)
 
     def handle(self, record):
         self.log_records.append(record)
