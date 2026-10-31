@@ -54,10 +54,10 @@ from hummingbot.connector.exchange.beezee.beezee_utils import (
     BeezeeVenueError,
     chain_amount_to_display,
     chain_price_to_display,
-    display_price_to_chain,
-    minimum_order_size_for_price,
     check_delegated_account,
+    display_price_to_chain,
     granter_address_from_account_mode,
+    minimum_order_size_for_price,
     private_key_from_account_mode,
 )
 from hummingbot.connector.exchange_py_base import ExchangePyBase

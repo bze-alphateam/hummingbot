@@ -21,8 +21,8 @@ from hummingbot.connector.exchange.beezee.beezee_tx import (
     gas_limit_from_simulation,
     msg_cancel_order,
     msg_create_order,
-    msg_fill_orders,
     msg_exec,
+    msg_fill_orders,
     msg_multi_swap,
 )
 from hummingbot.connector.exchange.beezee.beezee_utils import (

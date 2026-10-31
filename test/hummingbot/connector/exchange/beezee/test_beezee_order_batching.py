@@ -230,7 +230,7 @@ class FakeNode:
         for msg_index, message in enumerate(sent.messages):
             if sent.exec_grantee is not None:
                 msg_index = 0  # inside a MsgExec every event carries the MsgExec's index
-            message_id =f"{next(queued):024d}" if message.kind in ("create", "cancel") else None
+            message_id = f"{next(queued):024d}" if message.kind in ("create", "cancel") else None
             if message.kind == "fill":
                 our_side = "buy" if message.order_type == "sell" else "sell"
                 for price, amount in message.entries:
