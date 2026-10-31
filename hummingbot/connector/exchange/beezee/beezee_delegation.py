@@ -221,8 +221,9 @@ class BeezeeDelegation:
         return ", ".join(parts) + "."
 
     def is_check_due(self) -> bool:
-        if self._valid is None:
-            # Until the first read succeeds the connector is not ready: every status update tries again.
+        if self._valid is None or self._last_check is None:
+            # Until the first read succeeds the connector is not ready: every status update tries again. A refusal
+            # before any read makes the state invalid without a read.
             return True
         return self._clock() - self._last_check >= self._check_interval
 

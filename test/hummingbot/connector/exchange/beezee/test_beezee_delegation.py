@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -97,6 +98,8 @@ class BeezeeDelegationTestCase(BeezeeChainTestCase):
         self.grants: List[Dict[str, Any]] = [grant(message_type) for message_type in CONSTANTS.DELEGATED_MESSAGE_TYPE_URLS]
         self.allowance: Optional[Dict[str, Any]] = basic()
         self.read_error = False
+        # When set, the next grants read waits for it.
+        self.grants_read_gate: Optional[asyncio.Future] = None
         # A simulation refusal: the node's error text. A broadcast refusal: (codespace, code, raw log).
         self.simulation_refusal: Optional[str] = None
         self.broadcast_refusal: Optional[tuple] = None
@@ -112,7 +115,10 @@ class BeezeeDelegationTestCase(BeezeeChainTestCase):
         self.mock_api.post(f"{REST_URL}{CONSTANTS.SIMULATE_TX_PATH_URL}", repeat=True, callback=self._simulate_response)
         self.mock_api.post(f"{REST_URL}{CONSTANTS.BROADCAST_TX_PATH_URL}", repeat=True, callback=self._broadcast_response)
 
-    def _grants_response(self, url, **kwargs):
+    async def _grants_response(self, url, **kwargs):
+        gate, self.grants_read_gate = self.grants_read_gate, None
+        if gate is not None:
+            await gate
         if self.read_error:
             return CallbackResult(status=503, payload={"code": 14, "message": "unavailable", "details": []})
         return CallbackResult(payload={"grants": self.grants, "pagination": {"next_key": None}})
@@ -374,6 +380,19 @@ class BeezeeDelegationRefusalTests(BeezeeDelegationTestCase):
         await self._run_until(lambda: self._grant_reads() == 2, "no re-check after the refusal")
 
         self._assert_stopped("no allowance")
+
+    async def test_status_update_while_the_first_re_check_runs_after_a_refusal_before_any_check(self):
+        # The refusal comes before the first status update, and its re-check is still reading when the next status
+        # update runs: the update must read the grants itself, not fail on a check time that was never set.
+        self.grants_read_gate = asyncio.get_event_loop().create_future()
+        self.simulation_refusal = "failed to execute message; message index: 0: authorization not found"
+        await self._place_and_fail()
+        await self._run_until(lambda: self._grant_reads() == 1, "no re-check after the refusal")
+        self.simulation_refusal = None
+
+        await self._status_update()
+
+        self.assertEqual(2, self._grant_reads())
 
     async def test_other_refusals_leave_the_grants_alone(self):
         await self._status_update()
