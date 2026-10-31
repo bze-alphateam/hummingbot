@@ -367,7 +367,10 @@ class BeezeeAPIDataSource:
         return {"bids": bids, "asks": asks}
 
     async def get_market_history(self, market_id: str, limit: int = CONSTANTS.DEFAULT_HISTORY_LIMIT) -> List[Dict[str, Any]]:
-        return (await self._request(CONSTANTS.MARKET_HISTORY_PATH_URL, params={"market": market_id, "pagination.limit": limit})).get("list", [])
+        """The market's `limit` latest trades, newest first. The chain keys history by execution time and pages it
+        oldest first, so the newest are read with a reversed page."""
+        params = {"market": market_id, "pagination.limit": limit, "pagination.reverse": "true"}
+        return (await self._request(CONSTANTS.MARKET_HISTORY_PATH_URL, params=params)).get("list", [])
 
     async def get_last_traded_price(self, market_id: str) -> Optional[Decimal]:
         market = (await self.get_all_markets())[market_id]

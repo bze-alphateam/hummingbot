@@ -160,13 +160,16 @@ class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
                         BeezeeOrderBook.diff_message_from_exchange(trading_pair, market, bid_diffs, ask_diffs, update_id, time.time())
                     )
             self._last_books[trading_pair] = serialized
-            history = await self._data_source.get_market_history(market.market_id, limit=50)
-            seen = self._seen_trade_ids.setdefault(trading_pair, set())
+            # The latest trades, published oldest to newest. A trade that falls out of this window never comes back
+            # into it, so only the window's own ids are remembered.
+            history = await self._data_source.get_market_history(market.market_id, limit=CONSTANTS.TRADE_FEED_HISTORY_LIMIT)
+            seen = self._seen_trade_ids.get(trading_pair, set())
+            window = set()
             for trade in reversed(history):
                 trade_id = self._data_source.fingerprint_history_trade(trade)
+                window.add(trade_id)
                 if trade_id in seen:
                     continue
-                seen.add(trade_id)
                 self._message_queue[self._trade_messages_queue_key].put_nowait(
                     BeezeeOrderBook.trade_message_from_exchange(
                         trading_pair,
@@ -177,6 +180,7 @@ class BeezeeAPIOrderBookDataSource(OrderBookTrackerDataSource):
                         is_buyer_taker=trade.get("order_type") == CONSTANTS.SIDE_SELL,
                     )
                 )
+            self._seen_trade_ids[trading_pair] = window
 
     @staticmethod
     def _diff_levels(previous: Dict[str, str], current: Dict[str, str]) -> List[List[str]]:
