@@ -12,6 +12,7 @@ from pydantic import ConfigDict, Field, SecretStr, ValidationInfo, field_validat
 
 from hummingbot.client.config.config_data_types import BaseClientModel, BaseConnectorConfigMap
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
+from hummingbot.connector.exchange.beezee.beezee_signer import BeezeeSigner, bech32_decode
 from hummingbot.core.data_type.trade_fee import TokenAmount, TradeFeeSchema
 
 CENTRALIZED = False
@@ -224,6 +225,40 @@ def normalize_mnemonic(value: str) -> str:
     return normalized
 
 
+def normalize_bech32_address(value: Any, prefix: Optional[str] = None) -> str:
+    """The address, stripped, when it is a valid bech32 account address (with `prefix`, when given)."""
+    address = str(value or "").strip()
+    try:
+        hrp, payload = bech32_decode(address)
+    except ValueError as error:
+        raise ValueError(f"Beezee granter_address '{address}' is not a valid bech32 address ({error}).") from error
+    if len(payload) not in (20, 32):
+        raise ValueError(f"Beezee granter_address '{address}' is not an account address.")
+    if prefix is not None and hrp != prefix:
+        raise ValueError(f"Beezee granter_address '{address}' must start with the network's prefix '{prefix}1'.")
+    return address.lower()
+
+
+def _secret_value(value: Any) -> str:
+    if hasattr(value, "get_secret_value"):
+        value = value.get_secret_value()
+    return str(value)
+
+
+def validate_private_key_field(value: Any) -> str:
+    value = _secret_value(value)
+    if looks_like_encrypted_secret(value):
+        return value
+    return normalize_private_key(value)
+
+
+def validate_mnemonic_field(value: Any) -> str:
+    value = _secret_value(value)
+    if looks_like_encrypted_secret(value):
+        return value
+    return normalize_mnemonic(value)
+
+
 def normalize_hd_path(value: str) -> str:
     normalized = value.strip()
     if not RE_BIP32_PATH.match(normalized):
@@ -281,14 +316,22 @@ def derive_private_key_from_mnemonic(
 
 
 def private_key_from_account_mode(account_mode: Any) -> Optional[str]:
-    if isinstance(account_mode, BeezeeWalletAccountMode):
+    """The signing key: the wallet's own key, or the bot key in the delegated modes."""
+    if isinstance(account_mode, (BeezeeWalletAccountMode, BeezeeDelegatedAccountMode)):
         return account_mode.private_key.get_secret_value()
-    if isinstance(account_mode, BeezeeMnemonicWalletAccountMode):
+    if isinstance(account_mode, (BeezeeMnemonicWalletAccountMode, BeezeeDelegatedMnemonicAccountMode)):
         return derive_private_key_from_mnemonic(
             mnemonic=account_mode.mnemonic.get_secret_value(),
             passphrase=account_mode.passphrase.get_secret_value(),
             hd_path=account_mode.hd_path,
         )
+    return None
+
+
+def granter_address_from_account_mode(account_mode: Any) -> Optional[str]:
+    """The wallet the bot key trades for (through authz, gas paid by its feegrant) in the delegated modes, else None."""
+    if isinstance(account_mode, (BeezeeDelegatedAccountMode, BeezeeDelegatedMnemonicAccountMode)):
+        return account_mode.granter_address
     return None
 
 
@@ -429,12 +472,7 @@ class BeezeeWalletAccountMode(BaseClientModel):
     @field_validator("private_key", mode="before")
     @classmethod
     def validate_private_key(cls, value: Any):
-        if hasattr(value, "get_secret_value"):
-            value = value.get_secret_value()
-        value = str(value)
-        if looks_like_encrypted_secret(value):
-            return value
-        return normalize_private_key(value)
+        return validate_private_key_field(value)
 
 
 class BeezeeMnemonicWalletAccountMode(BaseClientModel):
@@ -475,17 +513,115 @@ class BeezeeMnemonicWalletAccountMode(BaseClientModel):
     @field_validator("mnemonic", mode="before")
     @classmethod
     def validate_mnemonic(cls, value: Any):
-        if hasattr(value, "get_secret_value"):
-            value = value.get_secret_value()
-        value = str(value)
-        if looks_like_encrypted_secret(value):
-            return value
-        return normalize_mnemonic(value)
+        return validate_mnemonic_field(value)
 
     @field_validator("hd_path", mode="before")
     @classmethod
     def validate_hd_path(cls, value: Any):
         return normalize_hd_path(str(value))
+
+
+def _granter_address_field():
+    return Field(
+        default=...,
+        json_schema_extra={
+            "prompt": "Enter the Beezee wallet the bot trades for (the authz and feegrant granter)",
+            "is_connect_key": True,
+            "prompt_on_new": True,
+        },
+    )
+
+
+class BeezeeDelegatedAccountMode(BaseClientModel):
+    """The bot key (`private_key`) signs; `granter_address` owns the funds. The bot key sends the tradebin messages
+    of `granter_address` in an authz MsgExec, and the gas is paid by the granter's feegrant allowance."""
+    name: Literal["delegated"] = "delegated"
+    private_key: SecretStr = Field(
+        default=...,
+        json_schema_extra={
+            "prompt": "Enter the bot key's Beezee private key (hex)",
+            "is_secure": True,
+            "is_connect_key": True,
+            "prompt_on_new": True,
+        },
+    )
+    granter_address: str = _granter_address_field()
+    model_config = ConfigDict(title="delegated")
+
+    @field_validator("private_key", mode="before")
+    @classmethod
+    def validate_private_key(cls, value: Any):
+        return validate_private_key_field(value)
+
+    @field_validator("granter_address", mode="before")
+    @classmethod
+    def validate_granter_address(cls, value: Any):
+        return normalize_bech32_address(value)
+
+
+class BeezeeDelegatedMnemonicAccountMode(BaseClientModel):
+    """`delegated`, with the bot key derived from a mnemonic."""
+    name: Literal["delegated_mnemonic"] = "delegated_mnemonic"
+    mnemonic: SecretStr = Field(
+        default=...,
+        json_schema_extra={
+            "prompt": "Enter the bot key's Beezee mnemonic",
+            "is_secure": True,
+            "is_connect_key": True,
+            "prompt_on_new": True,
+        },
+    )
+    passphrase: SecretStr = Field(
+        default=SecretStr(""),
+        json_schema_extra={
+            "prompt": "Enter the bot key's mnemonic passphrase (optional)",
+            "is_secure": True,
+            "is_connect_key": True,
+            "prompt_on_new": True,
+        },
+    )
+    hd_path: str = Field(
+        default=COSMOS_HUB_DERIVATION_PATH,
+        json_schema_extra={
+            "prompt": "Enter the bot key's HD derivation path",
+            "prompt_on_new": True,
+        },
+    )
+    granter_address: str = _granter_address_field()
+    model_config = ConfigDict(title="delegated_mnemonic")
+
+    @field_validator("mnemonic", mode="before")
+    @classmethod
+    def validate_mnemonic(cls, value: Any):
+        return validate_mnemonic_field(value)
+
+    @field_validator("hd_path", mode="before")
+    @classmethod
+    def validate_hd_path(cls, value: Any):
+        return normalize_hd_path(str(value))
+
+    @field_validator("granter_address", mode="before")
+    @classmethod
+    def validate_granter_address(cls, value: Any):
+        return normalize_bech32_address(value)
+
+
+def check_delegated_account(account_mode: Any, address_prefix: str):
+    """Refuses a delegated account whose granter has another network's prefix or is the bot key itself (authz refuses
+    a grant to oneself). The bot key is only checked when it is readable, i.e. not still encrypted."""
+    granter_address = getattr(account_mode, "granter_address", None)
+    if not isinstance(account_mode, (BeezeeDelegatedAccountMode, BeezeeDelegatedMnemonicAccountMode)) or not granter_address:
+        return
+    normalize_bech32_address(granter_address, prefix=address_prefix)
+    secret = getattr(account_mode, "private_key", None) or getattr(account_mode, "mnemonic", None)
+    if secret is None or looks_like_encrypted_secret(secret.get_secret_value()):
+        return
+    bot_address = BeezeeSigner(private_key_from_account_mode(account_mode), address_prefix).address
+    if bot_address == granter_address:
+        raise ValueError(
+            f"Beezee granter_address '{granter_address}' is the bot key's own address. In the delegated modes the bot "
+            f"key must be a separate key that the granter wallet authorizes."
+        )
 
 
 class BeezeeReadOnlyAccountMode(BaseClientModel):
@@ -504,6 +640,8 @@ class BeezeeReadOnlyAccountMode(BaseClientModel):
 ACCOUNT_MODES = {
     BeezeeWalletAccountMode.model_config["title"]: BeezeeWalletAccountMode,
     BeezeeMnemonicWalletAccountMode.model_config["title"]: BeezeeMnemonicWalletAccountMode,
+    BeezeeDelegatedAccountMode.model_config["title"]: BeezeeDelegatedAccountMode,
+    BeezeeDelegatedMnemonicAccountMode.model_config["title"]: BeezeeDelegatedMnemonicAccountMode,
     BeezeeReadOnlyAccountMode.model_config["title"]: BeezeeReadOnlyAccountMode,
 }
 
@@ -572,6 +710,12 @@ class BeezeeConfigMap(BaseConnectorConfigMap):
         if value not in ACCOUNT_MODES:
             raise ValueError(f"Invalid Beezee account type. Choose one of {list(ACCOUNT_MODES)}.")
         return ACCOUNT_MODES[value].model_construct()
+
+    @model_validator(mode="after")
+    def validate_delegated_account(self):
+        network = self.network
+        check_delegated_account(self.account_type, getattr(network, "address_prefix", None) or CONSTANTS.MAINNET_ADDRESS_PREFIX)
+        return self
 
 
 KEYS = BeezeeConfigMap.model_construct()

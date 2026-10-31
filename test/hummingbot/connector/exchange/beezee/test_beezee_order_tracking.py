@@ -127,6 +127,12 @@ class BeezeeChainTestCase(unittest.IsolatedAsyncioTestCase):
     config_overrides: Dict[str, Any] = {}
     # The pairs the connector is started with, i.e. the pairs the strategy trades.
     trading_pairs: List[str] = ["BZE-USDC", "TKN-BZE"]
+    # The account the txs are signed with: ADDRESS itself in the wallet modes, the bot key in the delegated modes.
+    signer_address: str = ADDRESS
+
+    def _account_type(self):
+        """The connector's account type. The traded account is always ADDRESS, the fixtures' order owner."""
+        return BeezeeMnemonicWalletAccountMode(mnemonic=TEST_MNEMONIC)
 
     def handle(self, record):
         self.log_records.append(record)
@@ -142,7 +148,7 @@ class BeezeeChainTestCase(unittest.IsolatedAsyncioTestCase):
         config = BeezeeConfigMap(
             connector="beezee",
             network=BeezeeCustomNetworkMode(rest_endpoint=REST_URL, rpc_endpoint=RPC_URL, chain_id="beezee-1"),
-            account_type=BeezeeMnemonicWalletAccountMode(mnemonic=TEST_MNEMONIC),
+            account_type=self._account_type(),
             # The harness names its test tokens USDC and TKN; on beezee-1 the asset list would call them USDC.INJ and OSMO.
             denom_labels={USDC: "USDC", TKN: "TKN"},
             **self.config_overrides,
@@ -206,7 +212,7 @@ class BeezeeChainTestCase(unittest.IsolatedAsyncioTestCase):
         api.get(re.compile(rf"^{re.escape(REST_URL + CONSTANTS.HALTED_DENOMS_PATH_URL)}(\?.*)?$"), repeat=True, payload={
             "denoms": [], "pagination": {"next_key": None},
         })
-        api.get(f"{REST_URL}{CONSTANTS.ACCOUNT_INFO_PATH_URL}/{ADDRESS}", repeat=True, payload={
+        api.get(f"{REST_URL}{CONSTANTS.ACCOUNT_INFO_PATH_URL}/{self.signer_address}", repeat=True, payload={
             "account": {"account_number": "7", "sequence": "3"},
         })
         self._mock_simulate()

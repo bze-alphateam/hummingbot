@@ -67,12 +67,34 @@ docker attach hummingbot
 Inside the Hummingbot client:
 
 1. `connect beezee`, then answer the prompts: network (`mainnet`, `testnet` or `custom`), account type (`wallet`,
-   `wallet_mnemonic` or `read_only`), the key or mnemonic, and the address. Hummingbot encrypts the secrets into
+   `wallet_mnemonic`, `delegated`, `delegated_mnemonic` or `read_only`), the key or mnemonic, and the address. Hummingbot encrypts the secrets into
    `conf/connectors/beezee.yml`. Never edit them in by hand.
 2. `balance` to check the account.
 3. Create a strategy or a script with `beezee` as the exchange, e.g. the pair `BZE-USDC.INJ` (see "Denom labels").
 
 Use a dedicated trading wallet that holds only the funds the bot should trade with.
+
+### Delegated account
+
+In the two delegated modes the funds stay in the user's wallet (the **granter**) and a separate **bot key** (the
+grantee) signs. The bot key sends the wallet's tradebin messages, each created by the wallet, in one authz `MsgExec`
+per tx, and the tx's fee granter is the wallet, so the wallet's feegrant allowance pays the gas. The bot key needs no
+funds, and its own balance is never read.
+
+- `delegated`: `private_key` (the bot key, hex) and `granter_address`.
+- `delegated_mnemonic`: `mnemonic`, `passphrase` and `hd_path` (the bot key, derived as in `wallet_mnemonic`) and
+  `granter_address`.
+
+`granter_address` is required, must carry the network's prefix (`bze1...`) and must not be the bot key's own address.
+Balances, open orders, fills and events are the granter's; the account number and sequence are the bot key's. The
+startup log names both: `account <granter> (delegated: bot key <grantee>, gas paid by the account's feegrant)`. Both
+modes can be set in `conf/connectors/beezee.yml` without prompts.
+
+The rule of "One wallet per bot" (see the AMM run guide) holds here too: one granter wallet = one bot, and the user
+does not trade the bot's pair by hand from that wallet while it runs (a restarted bot adopts every open order of the
+account on its pair). Every bot gets its own bot key, never shared between bots. Without the grants (authz for the
+tradebin messages, a feegrant allowance that allows `/cosmos.authz.v1beta1.MsgExec`) the chain refuses the
+simulation and nothing is sent. The grant and revoke commands follow in the delegated run guide.
 
 ## Denom labels
 
@@ -929,6 +951,8 @@ config of the script.
 - **Wallet modes.** `wallet` takes a hex private key. `wallet_mnemonic` takes a BIP39 mnemonic (optional passphrase)
   and derives the key on `hd_path`, default `m/44'/118'/0'/0/0`, the same as `bzed keys add --recover`. The
   derivation is pinned by a test against the address `bzed` v8.2.0 recovers from the public BIP39 test mnemonic.
+  `delegated` and `delegated_mnemonic` take the same key forms for the bot key, plus `granter_address` (see
+  "Delegated account"); their tx shape is pinned by a test against `bzed tx authz exec --fee-granter`.
 - **Gas.** Every create and cancel is simulated first. Gas limit = `ceil(gas_used × gas_adjustment)` + the queue
   extra below, fee = `ceil(gas limit × gas_price)` in ubze. Defaults: `gas_price` `0.01` (the mainnet public-node
   minimum), `gas_adjustment` `1.3`. Both are network settings. A failed simulation is never broadcast. The fixed

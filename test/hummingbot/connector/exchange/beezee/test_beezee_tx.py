@@ -14,6 +14,7 @@ from hummingbot.connector.exchange.beezee.beezee_tx import (
     gas_limit_from_simulation,
     msg_cancel_order,
     msg_create_order,
+    msg_exec,
     msg_fill_orders,
     msg_multi_swap,
 )
@@ -91,6 +92,48 @@ GOLDEN_FILL_SWAP_SIMULATION_TX = (
     "MDAwEhVoYm90LWZpbGwtc3dhcDpnb2xkZW4SVApQCkYKHy9jb3Ntb3MuY3J5cHRvLnNlY3AyNTZrMS5QdWJLZXkSIwohAk9OKtmc"
     "NNYLm6YoPJQxqEGK+GcyEpYfl6d7Y3f80FtiEgQKAggBGAMSABoA"
 )
+
+# A delegated create order: the bot key (the test mnemonic's key) sends the granter's MsgCreateOrder in an authz MsgExec,
+# with the granter as fee granter. Produced by `bzed tx authz exec inner.json --from <bot> --fee-granter <granter>
+# --fees 1301ubze --gas 130002 --note hbot:golden --generate-only`, signed offline (`bzed tx sign --offline -a 7 -s 3
+# --chain-id beezee-1`) and re-encoded with `bzed tx encode` (bzed v8.2.0). The tx body and the auth info, without the
+# signature.
+DELEGATED_GRANTER = "bze1k8py7ynzrrnmzqwk2mkz3a6znatmqshdnnsehy"
+GOLDEN_DELEGATED_BODY = (
+    "CrsBCh0vY29zbW9zLmF1dGh6LnYxYmV0YTEuTXNnRXhlYxKZAQoqYnplMTlybDRjbTJobXI4YWZ5NGtsZHB4ejNma2E0amd1cTBh"
+    "cHlwa2R6EmsKHC9iemUudHJhZGViaW4uTXNnQ3JlYXRlT3JkZXISSwoqYnplMWs4cHk3eW56cnJubXpxd2sybWt6M2E2em5hdG1x"
+    "c2hkbm5zZWh5EgNidXkaBzIwMDAwMDAiAzAuNSoKdWJ6ZS91dXNkYxILaGJvdDpnb2xkZW4="
+)
+GOLDEN_DELEGATED_AUTH_INFO = (
+    "ClAKRgofL2Nvc21vcy5jcnlwdG8uc2VjcDI1NmsxLlB1YktleRIjCiECT04q2Zw01gubpig8lDGoQYr4ZzISlh+Xp3tjd/zQW2IS"
+    "BAoCCAEYAxI+CgwKBHViemUSBDEzMDEQ0vcHIipiemUxazhweTd5bnpycm5tenF3azJta3ozYTZ6bmF0bXFzaGRubnNlaHk="
+)
+
+
+def _fields(data: bytes):
+    """(field number, value) of a protobuf message: an int for varints, bytes for length-delimited fields."""
+    fields, position = [], 0
+
+    def varint() -> int:
+        nonlocal position
+        value, shift = 0, 0
+        while True:
+            byte = data[position]
+            position += 1
+            value |= (byte & 0x7F) << shift
+            shift += 7
+            if not byte & 0x80:
+                return value
+
+    while position < len(data):
+        key = varint()
+        if key & 7 == 0:
+            fields.append((key >> 3, varint()))
+        else:
+            length = varint()
+            fields.append((key >> 3, data[position:position + length]))
+            position += length
+    return fields
 
 
 class BeezeeTxTests(unittest.TestCase):
@@ -306,3 +349,72 @@ class BeezeeFillTxGoldenVectorTests(unittest.TestCase):
         self.assertEqual({"amount": [], "gas_limit": "0", "payer": "", "granter": ""}, simulation["auth_info"]["fee"])
         self.assertEqual(64, len(base64.b64decode(signed["signatures"][0])))
         self.assertEqual([""], simulation["signatures"])
+
+
+class BeezeeDelegatedTxTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.bot = BeezeeSigner(TEST_MNEMONIC_PRIVATE_KEY, "bze")
+        self.inner = [msg_create_order(DELEGATED_GRANTER, "buy", "2000000", "0.5", "ubze/uusdc")]
+
+    def _tx_parts(self, tx_bytes: bytes):
+        tx_raw = _fields(tx_bytes)
+        return dict(tx_raw)[1], dict(tx_raw)[2], dict(tx_raw)[3]
+
+    def test_delegated_create_order_matches_bzed_authz_exec_with_fee_granter(self):
+        tx_bytes = build_signed_transaction(
+            signer=self.bot,
+            chain_id="beezee-1",
+            account_number=7,
+            sequence=3,
+            messages=[msg_exec(self.bot.address, self.inner)],
+            fee_denom="ubze",
+            fee_amount="1301",
+            gas_limit=130002,
+            memo="hbot:golden",
+            fee_granter=DELEGATED_GRANTER,
+        )
+
+        body, auth_info, signature = self._tx_parts(tx_bytes)
+        self.assertEqual(GOLDEN_DELEGATED_BODY, base64.b64encode(body).decode())
+        self.assertEqual(GOLDEN_DELEGATED_AUTH_INFO, base64.b64encode(auth_info).decode())
+        self.assertEqual(64, len(signature))
+
+    def test_msg_exec_holds_the_inner_messages_in_order(self):
+        cancel = msg_cancel_order(DELEGATED_GRANTER, "ubze/uusdc", "000000000000000000000042", "sell")
+
+        any_fields = _fields(msg_exec(self.bot.address, self.inner + [cancel]))
+
+        self.assertEqual([(1, b"/cosmos.authz.v1beta1.MsgExec")], any_fields[:1])
+        payload = _fields(dict(any_fields)[2])
+        self.assertEqual((1, self.bot.address.encode()), payload[0])
+        self.assertEqual([(2, self.inner[0]), (2, cancel)], payload[1:])
+
+    def test_fee_granter_is_fee_field_4_and_payer_stays_empty(self):
+        tx_bytes = build_signed_transaction(
+            signer=self.bot, chain_id="beezee-1", account_number=7, sequence=3,
+            messages=[msg_exec(self.bot.address, self.inner)], fee_denom="ubze", fee_amount="1301", gas_limit=130002,
+            fee_granter=DELEGATED_GRANTER,
+        )
+
+        fee = _fields(dict(_fields(self._tx_parts(tx_bytes)[1]))[2])
+        self.assertEqual([1, 2, 4], [number for number, _ in fee])
+        self.assertEqual(DELEGATED_GRANTER.encode(), dict(fee)[4])
+
+    def test_simulation_has_an_empty_fee_with_the_granter(self):
+        tx_bytes = build_simulation_transaction(
+            self.bot.public_key_bytes, sequence=3, messages=[msg_exec(self.bot.address, self.inner)],
+            memo="hbot:golden", fee_granter=DELEGATED_GRANTER,
+        )
+
+        body, auth_info, signature = self._tx_parts(tx_bytes)
+        self.assertEqual(GOLDEN_DELEGATED_BODY, base64.b64encode(body).decode())
+        auth_fields = _fields(auth_info)
+        self.assertEqual(_fields(base64.b64decode(GOLDEN_DELEGATED_AUTH_INFO))[0], auth_fields[0])  # the signer info
+        self.assertEqual([(4, DELEGATED_GRANTER.encode())], _fields(dict(auth_fields)[2]))
+        self.assertEqual(b"", signature)
+
+    def test_no_granter_keeps_the_wallet_mode_bytes(self):
+        self.assertEqual(
+            build_simulation_transaction(self.bot.public_key_bytes, 3, self.inner),
+            build_simulation_transaction(self.bot.public_key_bytes, 3, self.inner, fee_granter=None),
+        )

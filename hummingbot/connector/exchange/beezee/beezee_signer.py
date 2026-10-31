@@ -59,6 +59,24 @@ def bech32_encode(hrp: str, payload: bytes) -> str:
     return hrp + "1" + "".join(CHARSET[d] for d in combined)
 
 
+def bech32_decode(address: str):
+    """(hrp, payload bytes) of a bech32 address. Raises ValueError when it is not a valid bech32 string."""
+    if not isinstance(address, str) or address.lower() != address and address.upper() != address:
+        raise ValueError("mixed-case bech32 string")
+    address = address.lower()
+    separator = address.rfind("1")
+    if separator < 1 or separator + 7 > len(address) or len(address) > 90:
+        raise ValueError("bech32 string has no prefix or a too short data part")
+    hrp, data_part = address[:separator], address[separator + 1:]
+    if any(char not in CHARSET for char in data_part):
+        raise ValueError("bech32 string has a character outside the bech32 charset")
+    data = [CHARSET.find(char) for char in data_part]
+    if _bech32_polymod(_bech32_hrp_expand(hrp) + data) != 1:
+        raise ValueError("bech32 checksum mismatch")
+    payload = _convertbits(data[:-6], 5, 8, pad=False)
+    return hrp, bytes(payload)
+
+
 class BeezeeSigner:
     def __init__(self, private_key_hex: str, address_prefix: str):
         self._private_key_bytes = bytes.fromhex(private_key_hex)

@@ -1,6 +1,6 @@
 import base64
 from decimal import Decimal
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from hummingbot.connector.exchange.beezee.beezee_signer import BeezeeSigner
 
@@ -52,8 +52,17 @@ def _signer_info_message(public_key_bytes: bytes, sequence: int) -> bytes:
     return _encode_bytes(1, _pub_key_any(public_key_bytes)) + _encode_bytes(2, _mode_info_message()) + _encode_uint64(3, sequence)
 
 
-def _fee_message(denom: str, amount: str, gas_limit: int) -> bytes:
-    return _encode_bytes(1, _coin_message(denom, amount)) + _encode_uint64(2, gas_limit)
+def _fee_message(denom: str, amount: str, gas_limit: int, granter: Optional[str] = None) -> bytes:
+    # cosmos.tx.v1beta1.Fee: amount (1), gas_limit (2), payer (3, never set), granter (4).
+    fee = _encode_bytes(1, _coin_message(denom, amount)) + _encode_uint64(2, gas_limit)
+    if granter:
+        fee += _encode_string(4, granter)
+    return fee
+
+
+def _simulation_fee_message(granter: Optional[str] = None) -> bytes:
+    # An empty fee, but with the granter: the simulation then runs the feegrant check too.
+    return _encode_string(4, granter) if granter else b""
 
 
 def _auth_info_message(public_key_bytes: bytes, sequence: int, fee_message: bytes) -> bytes:
@@ -98,6 +107,13 @@ def msg_fill_orders(creator: str, market_id: str, order_type: str, orders: Seque
     return _any_message("/bze.tradebin.MsgFillOrders", payload)
 
 
+def msg_exec(grantee: str, inner_messages: List[bytes]) -> bytes:
+    """An authz MsgExec: `grantee` (the signer) runs `inner_messages`, each an Any as built above, on behalf of their
+    creator (the granter)."""
+    payload = _encode_string(1, grantee) + b"".join(_encode_bytes(2, message) for message in inner_messages)
+    return _any_message("/cosmos.authz.v1beta1.MsgExec", payload)
+
+
 def build_signed_transaction(
     signer: BeezeeSigner,
     chain_id: str,
@@ -108,9 +124,12 @@ def build_signed_transaction(
     fee_amount: str,
     gas_limit: int,
     memo: str = "",
+    fee_granter: Optional[str] = None,
 ) -> bytes:
     body_bytes = _tx_body_message(messages=messages, memo=memo)
-    auth_info_bytes = _auth_info_message(signer.public_key_bytes, sequence, _fee_message(fee_denom, fee_amount, gas_limit))
+    auth_info_bytes = _auth_info_message(
+        signer.public_key_bytes, sequence, _fee_message(fee_denom, fee_amount, gas_limit, granter=fee_granter)
+    )
     sign_doc = _sign_doc_message(body_bytes, auth_info_bytes, chain_id, account_number)
     signature = signer.sign(sign_doc)
     return _tx_raw_message(body_bytes, auth_info_bytes, signature)
@@ -121,11 +140,12 @@ def build_simulation_transaction(
     sequence: int,
     messages: List[bytes],
     memo: str = "",
+    fee_granter: Optional[str] = None,
 ) -> bytes:
     # Same shape as the signed tx, with an empty fee and an empty signature: the chain
     # skips signature verification in simulate mode but still checks the sequence.
     body_bytes = _tx_body_message(messages=messages, memo=memo)
-    auth_info_bytes = _auth_info_message(public_key_bytes, sequence, b"")
+    auth_info_bytes = _auth_info_message(public_key_bytes, sequence, _simulation_fee_message(fee_granter))
     return _tx_raw_message(body_bytes, auth_info_bytes, b"")
 
 

@@ -86,6 +86,10 @@ class SentTx:
     memo: str
     sequence: int
     gas_limit: int = 0
+    # The type urls of the tx body's own messages, the MsgExec grantee (delegated mode) and the fee granter.
+    outer_types: List[str] = field(default_factory=list)
+    exec_grantee: Optional[str] = None
+    fee_granter: str = ""
 
     @property
     def kinds(self) -> List[str]:
@@ -96,10 +100,21 @@ def decode_tx(request_kwargs: Dict[str, Any]) -> SentTx:
     tx_raw = _fields(base64.b64decode(json.loads(request_kwargs["data"])["tx_bytes"]))
     body, auth_info = _fields(_first(tx_raw, 1)), _fields(_first(tx_raw, 2))
     messages = []
+    outer_types, exec_grantee, inner = [], None, []
     for number, any_bytes in body:
         if number != 1:
             continue
         any_fields = _fields(any_bytes)
+        type_url = _first(any_fields, 1).decode()
+        outer_types.append(type_url)
+        if type_url == "/cosmos.authz.v1beta1.MsgExec":
+            # Delegated mode: the tradebin messages are the MsgExec's msgs, in order.
+            exec_fields = _fields(_first(any_fields, 2))
+            exec_grantee = _first(exec_fields, 1).decode()
+            inner += [_fields(value) for number, value in exec_fields if number == 2]
+        else:
+            inner.append(any_fields)
+    for any_fields in inner:
         type_url, payload = _first(any_fields, 1).decode(), _fields(_first(any_fields, 2))
         if type_url == "/bze.tradebin.MsgMultiSwap":
             assert _first(payload, 1).decode() == ADDRESS
@@ -129,7 +144,10 @@ def decode_tx(request_kwargs: Dict[str, Any]) -> SentTx:
             messages.append(SentMessage("cancel", text[2], text[4], order_id=text[3]))
     signer_info = _fields(_first(auth_info, 1))
     fee = _fields(_first(auth_info, 2, b""))
-    return SentTx(messages, _first(body, 2, b"").decode(), _first(signer_info, 3, 0), _first(fee, 2, 0))
+    return SentTx(
+        messages, _first(body, 2, b"").decode(), _first(signer_info, 3, 0), _first(fee, 2, 0),
+        outer_types=outer_types, exec_grantee=exec_grantee, fee_granter=_first(fee, 4, b"").decode(),
+    )
 
 
 @dataclass
@@ -210,6 +228,8 @@ class FakeNode:
         # Queue message ids in queue order: one per create and cancel, one per fill entry (swaps do not queue).
         queued = iter(range(1000))
         for msg_index, message in enumerate(sent.messages):
+            if sent.exec_grantee is not None:
+                msg_index = 0  # inside a MsgExec every event carries the MsgExec's index
             message_id = f"{next(queued):024d}" if message.kind in ("create", "cancel") else None
             if message.kind == "fill":
                 our_side = "buy" if message.order_type == "sell" else "sell"
@@ -335,7 +355,7 @@ class BeezeeBatchingTestCase(BeezeeChainTestCase):
     def _mock_chain_state(self):
         # The node answers the account query (registered first, so it wins over the harness's fixed sequence).
         self.mock_api.get(
-            f"{REST_URL}{CONSTANTS.ACCOUNT_INFO_PATH_URL}/{ADDRESS}", repeat=True,
+            f"{REST_URL}{CONSTANTS.ACCOUNT_INFO_PATH_URL}/{self.signer_address}", repeat=True,
             callback=lambda url, **kwargs: self.node.account(url, **kwargs),
         )
         super()._mock_chain_state()
