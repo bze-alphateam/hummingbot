@@ -484,7 +484,7 @@ class BeezeePoolVolumeTests(unittest.IsolatedAsyncioTestCase):
     async def test_example_config_loads(self):
         config = BeezeePoolVolumeConfig(**yaml.safe_load(EXAMPLE.read_text()))
         self.assertEqual("beezee", config.exchange)
-        self.assertEqual("BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A", config.trading_pair)
+        self.assertEqual("BZE-USDC.INJ", config.trading_pair)
         self.assertEqual("beezee_pool_volume.py", config.script_file_name)
         self.assertEqual(Decimal("0.5"), config.max_reserve_share_pct)
         self.assertEqual(900, config.cycle_seconds)

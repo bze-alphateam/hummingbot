@@ -46,7 +46,7 @@ class BeezeeVolumeTargetConfig(StrategyV2ConfigBase):
     coingecko_id_quote: Optional[str] = Field(None)
     exclude_markets: List[str] = Field(["BeeZee DEX"])
     # Connector price units per CoinGecko price unit (base priced in the quote token): 1 when both tokens have
-    # their display units on chain, 1000000 for BZE quoted in USDC.inj base units.
+    # their display units (the default), 1000000 for a quote token counted in base units.
     anchor_price_scale: Decimal = Field(Decimal("1"), gt=0)
     anchor_refresh_seconds: int = Field(300, gt=0)
     anchor_max_age_seconds: int = Field(1800, gt=0)

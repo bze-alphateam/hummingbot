@@ -1,9 +1,9 @@
 #########################################################
-###  Pool <-> order-book arbitrage: testnet TUSDC/BZE ###
+###  Pool <-> order-book arbitrage: testnet TBZE/TUSDC ###
 #########################################################
 # Copy to conf/scripts/beezee_pool_book_arb_testnet.yml, then
 #   start --v2 beezee_pool_book_arb_testnet.yml
-# Takes the asks below the pool price and sells the same TUSDC on the pool, or buys TUSDC on the pool and sells it
+# Takes the asks below the pool price and sells the same TBZE on the pool, or buys TBZE on the pool and sells it
 # into the bids above the pool price. Both legs go out in one tx (MsgFillOrders + MsgMultiSwap).
 # How it works and what it costs: README_BZE.md, sections "Pool / order-book arbitrage" and "AMM run guide".
 # Network: bzetestnet-3. In `connect beezee` pick network `testnet` with the endpoints of README_BZE.md "Testnet run"
@@ -14,22 +14,23 @@ controllers_config: []
 
 exchange: beezee
 
-# TUSDC quoted in BZE: market factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd / ubze, pool
-# factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd_ubze (pool fee 0.2%, about 1.31 BZE per TUSDC in
-# October 2026). The arb needs both venues and testnet has only the pool: the market has to be created once before
-# the first run, else the script refuses to start (README_BZE.md, "AMM run guide", testnet pair). Both sides display
-# with 6 decimals, so every amount below is in whole tokens.
-trading_pair: "TUSDC-BZE"
+# Testnet BZE (ubze, labelled TBZE as on testnet-dex.getbze.com) quoted in TUSDC: market
+# ubze/factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd and pool
+# factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd_ubze (pool fee 0.2%). The pool sorts its denoms, so its
+# base is TUSDC: it points the opposite way from the market, and the connector reads it in the pair's orientation
+# (about 0.763 TUSDC per TBZE in October 2026). See README_BZE.md, "AMM run guide", testnet pair.
+# Both tokens have 6 decimals, so every amount below is in whole tokens.
+trading_pair: "TBZE-TUSDC"
 
 # Profit an arb must keep after every fee, in % of what it spends.
 min_profit_pct: 0.3
 
-# Largest arb, in TUSDC (about 65 BZE). Small on purpose: testnet funds only.
-max_trade_base: 50
+# Largest arb, in TBZE (about 50 TUSDC). Small on purpose: testnet funds only.
+max_trade_base: 65
 
-# Balances the script never touches: TUSDC, then BZE. The BZE reserve keeps the fees paid.
-reserve_base: 0
-reserve_quote: 20
+# Balances the script never touches: TBZE, then TUSDC. The TBZE reserve keeps the fees paid.
+reserve_base: 20
+reserve_quote: 0
 
 # The chain refuses the swap rather than pay out more than this % below the quote.
 slippage_pct: 0.5
@@ -42,6 +43,6 @@ max_rebalance_cost_pct: 1
 cooldown_blocks: 2
 check_interval_seconds: 10
 
-# Cost of one arb: the pool fee (0.2% of the swap) + 2 x 0.1 BZE taker fee + gas (about 300,000 gas x 0.01 ubze =
-# 0.003 BZE). An arb on 20 TUSDC (about 26 BZE) therefore needs a gap of about 0.2% + 0.8% + 0.3% = 1.3%.
+# Cost of one arb: the pool fee (0.2% of the swap) + 2 x 0.1 TBZE taker fee + gas (about 300,000 gas x 0.01 ubze =
+# 0.003 TBZE). An arb on 26 TBZE (about 20 TUSDC) therefore needs a gap of about 0.2% + 0.8% + 0.3% = 1.3%.
 estimated_gas_bze: 0.005

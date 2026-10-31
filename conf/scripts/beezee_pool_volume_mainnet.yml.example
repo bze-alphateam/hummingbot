@@ -15,26 +15,23 @@ controllers_config: []
 exchange: beezee
 
 # BZE quoted in USDC bridged from Injective (USDC.inj): pool ibc/81DA528F…_ubze, pool fee 0.1% (to the LPs).
-# The chain's metadata gives USDC.inj no display unit, so the bot counts it in base units (1 = 0.000001 USDC).
-# Volumes and swap bounds below are in the same units. One side of the pair must be BZE: the fees and the gas are
+# USDC.inj counts in USDC (6 decimals, from the asset list); volumes and swap bounds below are in USDC. One side of the pair must be BZE: the fees and the gas are
 # paid in BZE and converted with the pair's own price.
-# Pair name: the connector names USDC.inj after its current on-chain metadata (symbol ERC20:0XA00C…, no display
-# unit). That naming is not final and may change; if the pair is reported unknown, take the current name from the
-# pair autocomplete (`create`, pick a strategy with `beezee`).
-trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+# Pair name: USDC.inj is labelled USDC.INJ, as on dex.getbze.com (README_BZE.md, "Denom labels").
+trading_pair: "BZE-USDC.INJ"
 
-# Volume to print per UTC day, in USDC.inj base units: 20000000 = 20 USDC. Both legs of a round trip count.
+# Volume to print per UTC day, in USDC. Both legs of a round trip count.
 # Placeholder: set your own target.
-daily_volume_quote: 20000000
+daily_volume_quote: 20
 
 # One round trip per cycle. 900 s = 96 cycles a day. Each round trip pays 2 taker fees + gas whatever its size,
 # so fewer, larger cycles cost less.
 cycle_seconds: 900
 
-# Bounds of one leg, in USDC.inj base units (a BZE leg is valued at the pool price). Each cycle swaps
+# Bounds of one leg, in USDC (a BZE leg is valued at the pool price). Each cycle swaps
 # (volume still to do today / cycles left today / 2), clamped to these.
-min_swap_amount: 10000
-max_swap_amount: 5000000
+min_swap_amount: 0.01
+max_swap_amount: 5
 
 # Leg 1 spends at most this % of the pool's reserve of its input token, whatever the target asks.
 max_reserve_share_pct: 0.5

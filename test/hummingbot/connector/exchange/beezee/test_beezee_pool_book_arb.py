@@ -623,7 +623,7 @@ class BeezeePoolBookArbTests(unittest.IsolatedAsyncioTestCase):
     async def test_example_config_loads(self):
         config = BeezeePoolBookArbConfig(**yaml.safe_load(EXAMPLE.read_text()))
         self.assertEqual("beezee", config.exchange)
-        self.assertEqual("BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A", config.trading_pair)
+        self.assertEqual("BZE-USDC.INJ", config.trading_pair)
         self.assertEqual("beezee_pool_book_arb.py", config.script_file_name)
         self.assertTrue(config.rebalance_on_partial)
         self.assertEqual(2, config.cooldown_blocks)

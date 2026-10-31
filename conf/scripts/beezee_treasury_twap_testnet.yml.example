@@ -1,9 +1,9 @@
 #########################################################
-###  Treasury TWAP: testnet TUSDC/BZE                 ###
+###  Treasury TWAP: testnet TBZE/TUSDC                ###
 #########################################################
 # Copy to conf/scripts/beezee_treasury_twap_testnet.yml, then
 #   start --v2 beezee_treasury_twap_testnet.yml
-# Sells 60 TUSDC for BZE over 30 minutes, one slice every 5 minutes, each slice sent whole to the cheaper venue (the
+# Sells 78 TBZE for TUSDC over 30 minutes, one slice every 5 minutes, each slice sent whole to the cheaper venue (the
 # pool or the book) when the pair has both, else to the venue it has.
 # How it works and what it costs: README_BZE.md, sections "Treasury TWAP" and "AMM run guide".
 # Network: bzetestnet-3. In `connect beezee` pick network `testnet` with the endpoints of README_BZE.md "Testnet run"
@@ -14,15 +14,18 @@ controllers_config: []
 
 exchange: beezee
 
-# TUSDC quoted in BZE: pool factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd_ubze (pool fee 0.2%). Testnet
-# has no TUSDC/BZE order-book market, so `venue: best` trades on the pool alone; if a market is created, it compares
-# both (README_BZE.md, "AMM run guide", testnet pair).
-trading_pair: "TUSDC-BZE"
+# Testnet BZE (ubze, labelled TBZE as on testnet-dex.getbze.com) quoted in TUSDC: market
+# ubze/factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd and pool
+# factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd_ubze (pool fee 0.2%). The pool sorts its denoms, so its
+# base is TUSDC: it points the opposite way from the market, and the connector reads it in the pair's orientation
+# (about 0.763 TUSDC per TBZE in October 2026). See README_BZE.md, "AMM run guide", testnet pair.
+# `venue: best` compares the pool and the book for each slice.
+trading_pair: "TBZE-TUSDC"
 
 side: sell
-total_amount: 60
+total_amount: 78
 
-# 0.5 h / 300 s = 6 slices of 10 TUSDC (about 13 BZE each).
+# 0.5 h / 300 s = 6 slices of 13 TBZE (about 10 TUSDC each).
 duration_hours: 0.5
 slice_interval_seconds: 300
 
@@ -31,12 +34,12 @@ limit_price:
 venue: best
 slippage_pct: 0.5
 
-# Balances the script never spends: BZE (also covers the fees), then TUSDC.
-keep_quote_reserve: 20
-keep_base_reserve: 0
+# Balances the script never spends: TUSDC, then TBZE (also covers the fees).
+keep_quote_reserve: 0
+keep_base_reserve: 20
 
 catch_up: true
 
-# Cost of one slice: 0.1 BZE taker fee + gas (about 200,000 gas x 0.01 ubze = 0.002 BZE), plus the pool fee (0.2%)
-# on a pool slice. About 0.65 BZE for the whole run.
+# Cost of one slice: 0.1 TBZE taker fee + gas (about 200,000 gas x 0.01 ubze = 0.002 TBZE), plus the pool fee (0.2%)
+# on a pool slice. About 0.65 TBZE for the whole run.
 estimated_gas_bze: 0.005

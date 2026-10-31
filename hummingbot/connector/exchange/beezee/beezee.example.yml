@@ -20,6 +20,11 @@ network:
 batch_window_ms: 300
 max_messages_per_tx: 25
 
+# Optional label per denom, over the chain-registry asset list and the denom metadata. Labels name the tokens in pair
+# names, balances and logs, and must be unique on the chain (README_BZE.md, "Denom labels").
+# denom_labels:
+#   "factory/bze1.../utoken": "TOKEN"
+
 account_type:
   name: "wallet"
   private_key: "replace with 32-byte hex private key"

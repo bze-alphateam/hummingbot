@@ -70,9 +70,58 @@ Inside the Hummingbot client:
    `wallet_mnemonic` or `read_only`), the key or mnemonic, and the address. Hummingbot encrypts the secrets into
    `conf/connectors/beezee.yml`. Never edit them in by hand.
 2. `balance` to check the account.
-3. Create a strategy or a script with `beezee` as the exchange, e.g. the pair `BZE-USDC`.
+3. Create a strategy or a script with `beezee` as the exchange, e.g. the pair `BZE-USDC.INJ` (see "Denom labels").
 
 Use a dedicated trading wallet that holds only the funds the bot should trade with.
+
+## Denom labels
+
+The connector names every denom the way the BeeZee dapps do, so pairs, balances, `status` and the logs show the
+tokens users see on dex.getbze.com (testnet: testnet-dex.getbze.com). A denom's label, and its decimals, come from
+the first of:
+
+1. **`denom_labels` in the connector config**, an override per denom (see below);
+2. **the chain-registry asset list** the dapps are built with (cosmos/chain-registry `beezee/assetlist.json` on
+   mainnet, the dapps' own list on testnet): an IBC token takes the entry's `symbol`, a native or factory token its
+   `display` unit, upper-cased, with the decimals of that display unit. The connector carries a copy in
+   `beezee_denom_labels.py`; a token added to the list later is named by its metadata until that copy is updated, or by
+   an override;
+3. **the denom's bank metadata**: its symbol, else its display unit, else the last part of the denom (the names the
+   connector used before labels).
+
+A label is upper-case, without spaces, and with `_` for `-` (Hummingbot splits a pair name on `-`). Some labels:
+
+| Denom | Mainnet `beezee-1` | Testnet `bzetestnet-3` |
+|---|---|---|
+| `ubze` | `BZE` | `TBZE` |
+| USDC.inj `ibc/81DA…` | `USDC.INJ` (6 decimals) | |
+| USDC.n `ibc/6490…` | `USDC.N` | |
+| Lumen | `LMN` (`ibc/693D…`) | `LMN` (`ibc/9DA2…`, 6 decimals) |
+| Vidulum | `VDL` | `VDL` |
+| TUSDC `factory/…/testusd` | | `TUSDC` (metadata) |
+
+**Unique labels.** Labels from 1 and 2 must be unique on the chain: when two denoms get the same one, the config is
+refused and the connector does not start, with an error naming the label and both denoms. A metadata label is chosen by
+whoever created the token, so it never takes another denom's label: a factory token whose metadata says `BZE` is listed
+as `BZE_<4 hex>` instead (the first 4 hex digits of its denom's sha1), with a warning in the log. Give it a label of
+your own with an override.
+
+**Overrides.** `denom_labels` is not prompted. Add it to `conf/connectors/beezee.yml` while the client is stopped
+(leave the encrypted fields alone), then start the client again:
+
+```yaml
+denom_labels:
+  "ibc/81DA528F4C5546208D1D50F84C2D0B388B45D37AA36FCA622A3CB2D8EF014838": "USDC"
+```
+
+**Old pair names.** Before labels the connector named every token after its metadata, so mainnet BZE/USDC.inj was
+`BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A` (with USDC counted in base units) and testnet BZE/TUSDC was
+`BZE-TUSDC`. A strategy, script or controller that still uses an old name does not start: the connector stays not
+ready (status flag `trading_pair_names_current`) and logs `Beezee pair '<old>' is now named '<new>'`. Put the new
+name in the config. A token whose decimals now come from the asset list (USDC.inj: 6 instead of 0) also counts its
+amounts and prices in its display unit, so a mainnet config written for `BZE-ERC20:0XA00C…` needs its USDC amounts
+and prices divided by 1,000,000 (e.g. `daily_volume_quote: 20000000` becomes `20`, a price of `333` becomes
+`0.000333`, and the volume target's `anchor_price_scale` goes back to `1`).
 
 ## Pure market making examples
 
@@ -80,8 +129,8 @@ Two ready strategy configs for upstream's `pure_market_making` live in `conf/str
 
 | File | Network | Pair |
 |------|---------|------|
-| `beezee_pmm_testnet.yml.example` | testnet `bzetestnet-3` | `ULMN-TUSDC` |
-| `beezee_pmm_bze_usdc.yml.example` | mainnet `beezee-1` | `BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A` (BZE/USDC.inj) |
+| `beezee_pmm_testnet.yml.example` | testnet `bzetestnet-3` | `LMN-TUSDC` |
+| `beezee_pmm_bze_usdc.yml.example` | mainnet `beezee-1` | `BZE-USDC.INJ` (BZE/USDC.inj) |
 
 Both quote 5 levels per side, 1% from the mid price and 0.5% apart, refresh every 30 s (orders within 0.2% of
 their target stay), keep the inventory near 50/50, wait 30 s after a fill and take the mid price from the BeeZee book
@@ -95,11 +144,9 @@ in the next (`should_wait_order_cancel_confirmation: true`, upstream's default).
 creates share one tx, but the wallet then needs enough free balance for both sets of levels, since the chain only
 releases a cancelled order's funds at the end of the block.
 
-The pair names are what the connector lists: it names a token after its on-chain denom metadata. On mainnet that
-metadata gives USDC.inj the symbol `ERC20:0XA00C…` and no display unit, so the bot counts USDC in base units
-(1 = 0.000001 USDC) and shows the BZE price as about 333 instead of 0.000333. Orders are still priced right on chain.
-USDC.n lists as `BZE-UUSDC`. To see every pair the connector knows, run `create`, pick `pure_market_making` and
-`beezee`, and look at the trading pair autocomplete.
+The pair names are what the connector lists, from the denom labels (see "Denom labels"): BZE/USDC.inj is
+`BZE-USDC.INJ`, with USDC in whole USDC (BZE at about 0.000333), and USDC.n lists as `BZE-USDC.N`. To see every pair
+the connector knows, run `create`, pick `pure_market_making` and `beezee`, and look at the trading pair autocomplete.
 
 ### Seeding the book
 
@@ -146,13 +193,13 @@ Network facts (October 2026, chain v8.2.0):
 | REST | `https://testnet.getbze.com` |
 | RPC | `https://testnet-rpc.getbze.com` (serves `/block_results` for recent heights, as order tracking needs) |
 | Minimum gas price | `0.01ubze` (chain param `ValidatorMinGasFee`; 0.001 is rejected as insufficient fees) |
-| Market | `ibc/9DA252F9…80CC7/factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd`, the only one, listed as `ULMN-TUSDC` |
+| Markets | `ibc/9DA252F9…80CC7/factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd`, listed as `LMN-TUSDC`, and `ubze/factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd`, listed as `TBZE-TUSDC` (see "Testnet pair") |
 | Explorer / dex | testnet-explorer.getbze.com / testnet-dex.getbze.com |
 
 1. **Throwaway wallet.** Create a fresh key that never holds real funds, e.g. `bzed keys add hb-testnet
    --keyring-backend test`, and keep the printed mnemonic. Send it some testnet BZE from a test wallet you already
-   have (it pays the gas and the tradebin fees). In testnet-dex.getbze.com, swap part of it for ULMN and for TUSDC in
-   their pools: a few thousand ULMN and a few TUSDC are plenty for the example config.
+   have (it pays the gas and the tradebin fees). In testnet-dex.getbze.com, swap part of it for LMN and for TUSDC in
+   their pools: a few LMN and a few TUSDC are plenty for the example config.
 2. **Seed the book** if it lacks a bid or an ask (see "Seeding the book"). A second testnet wallet is also what you
    use to fill the bot's orders by hand.
 3. **Connect.** In the client run `connect beezee` and answer:
@@ -161,7 +208,7 @@ Network facts (October 2026, chain v8.2.0):
    - gas price `0.01` (the chain minimum; a higher one works too), gas adjustment `1.3`;
    - account type `wallet_mnemonic`, the throwaway mnemonic, empty passphrase, the default HD path, and the address.
 
-   Then `balance`: it shows BZE, ULMN and TUSDC as in the dex app.
+   Then `balance`: it shows TBZE, LMN and TUSDC as in the dex app (testnet BZE is labelled TBZE there).
 4. **Batching.** `batch_window_ms` (default `300`) and `max_messages_per_tx` (default `25`) are not prompted. To change
    them, edit those two top-level keys in `conf/connectors/beezee.yml` while the client is stopped (leave the
    encrypted fields alone), then start it again.
@@ -222,8 +269,9 @@ fees + gas, the cost per 1,000 quote units of volume and why the last cycle skip
 aggregator. It is the volume-weighted `converted_last.usd` of CoinGecko's tickers for `coingecko_id_base`, leaving out
 the venues in `exclude_markets` (default `BeeZee DEX`: CoinGecko's own BZE price includes this DEX, which the script
 would come to dominate) and tickers CoinGecko flags as stale or anomalous. It is divided by the USD price of
-`coingecko_id_quote` (1 when unset) and multiplied by `anchor_price_scale` to get the connector's price units: 1000000
-for BZE/USDC.inj, whose quote the bot counts in base units. It refreshes every `anchor_refresh_seconds` (two requests;
+`coingecko_id_quote` (1 when unset) and multiplied by `anchor_price_scale` to get the connector's price units: 1
+(the default) when both tokens count in display units, as BZE/USDC.inj does, 1000000 for a quote counted in base
+units. It refreshes every `anchor_refresh_seconds` (two requests;
 300 fits the public rate limit). An optional API key comes from the `COINGECKO_API_KEY` env var (demo tier;
 `COINGECKO_API_TIER=PRO` for a pro key), never from the yml.
 
@@ -247,7 +295,7 @@ restart starts the day's volume and spend from zero.
 and documents every key; a test loads it.
 
 **Testnet.** Testnet has no CoinGecko price, so leave `coingecko_id_base` empty with `anchor_fallback: book_mid`, set
-`trading_pair: ULMN-TUSDC`, `anchor_price_scale: 1` and a small `daily_volume_quote`. The book needs a bid and an ask
+`trading_pair: LMN-TUSDC`, `anchor_price_scale: 1` and a small `daily_volume_quote`. The book needs a bid and an ask
 several ticks apart (see "Seeding the book"). Checks:
 
 - [ ] With `cycle_seconds: 60`, run for about 30 minutes: the filled volume BZE Scan shows for the bot's address
@@ -269,10 +317,11 @@ The connector reads the tradebin liquidity pools (AMM) of the pairs it trades. N
   `all_liquidity_pools`: a pair has an order-book market, a pool, or both (see "Pools and markets are separate venues"
   in the AMM run guide).
 - **Which pool.** A pair has at most one pool, whose id is its two denoms sorted and joined by `_`. A pair with a market
-  keeps the market's orientation (`base/quote`), so the pool's base can be the pair's quote: BZE-USDC (market
-  `ubze/ibc/81DA…`) trades against pool `ibc/81DA…_ubze`. A pool-only pair takes the pool's orientation (TUSDC-BZE for
-  pool `factory/…/testusd_ubze`). The connector reads reserves by denom, so every price and quote comes out in the
-  pair's own orientation.
+  keeps the market's orientation (`base/quote`), so the pool's base can be the pair's quote: BZE-USDC.INJ (market
+  `ubze/ibc/81DA…`) trades against pool `ibc/81DA…_ubze`, and testnet TBZE-TUSDC (market `ubze/factory/…/testusd`)
+  against pool `factory/…/testusd_ubze`. Such a pool quotes the inverse of its market. A pool-only pair takes the
+  pool's orientation (testnet LMN-TBZE for pool `ibc/9DA2…_ubze`). The connector reads reserves by denom, so every
+  price and quote comes out in the pair's own orientation.
 - **Refresh.** All pools are read once, then the pools of the traded pairs on every new block. A failed read keeps
   the last reserves and logs a warning. A pool is halted while either of its denoms is in the halted list (the same
   list the order book uses). When a traded pair has a pool, the connector is not `ready` (status flag
@@ -409,7 +458,7 @@ reason. The counters live in memory: a restart starts them from zero and forgets
 **Run.** `cp conf/scripts/beezee_pool_book_arb_mainnet.yml.example hb/conf/scripts/beezee_pool_book_arb.yml`, set
 `max_trade_base` and the reserves, fund the wallet with both tokens (plus BZE for fees), then
 `start --v2 beezee_pool_book_arb.yml`. The `_mainnet` example is for BZE/USDC.inj, `_token_bze` is a TOKEN/BZE
-template and `_testnet` runs on testnet TUSDC/BZE (see "AMM run guide"). Each documents every key; a test loads them.
+template and `_testnet` runs on testnet TBZE/TUSDC (see "AMM run guide"). Each documents every key; a test loads them.
 
 **Testnet.** Use a pair with BZE on one side that has both a market and a pool, and a second wallet.
 
@@ -476,7 +525,7 @@ also an LP in that pool gets their share of the pool fee back. Example on BZE/US
 **Run.** `cp conf/scripts/beezee_pool_volume_mainnet.yml.example hb/conf/scripts/beezee_pool_volume.yml`, set
 `daily_volume_quote` and `max_daily_fee_spend`, fund the wallet with both tokens (plus BZE for fees), then
 `start --v2 beezee_pool_volume.yml`. The `_mainnet` example is for BZE/USDC.inj, `_token_bze` is a TOKEN/BZE template
-and `_testnet` runs on testnet TUSDC/BZE (see "AMM run guide"). Each documents every key; a test loads them.
+and `_testnet` runs on testnet TBZE/TUSDC (see "AMM run guide"). Each documents every key; a test loads them.
 
 **Testnet.** Use a pair with BZE on one side that has a pool.
 
@@ -544,7 +593,7 @@ nothing else may close a hedged fill on the book, and a level waits `cooldown_ti
 
 **Run.** Copy `conf/controllers/beezee_pool_anchored_pmm_mainnet.yml.example` (BZE/USDC.inj),
 `beezee_pool_anchored_pmm_token_bze.yml.example` (a TOKEN/BZE template, replace the placeholders) or
-`beezee_pool_anchored_pmm_testnet.yml.example` (testnet TUSDC/BZE) to `conf/controllers/<name>.yml` and set
+`beezee_pool_anchored_pmm_testnet.yml.example` (testnet TBZE/TUSDC) to `conf/controllers/<name>.yml` and set
 `total_amount_quote`. A controller runs inside upstream's `v2_with_controllers` script:
 `conf/scripts/beezee_pool_anchored_pmm_runner_{mainnet,testnet}.yml.example` are ready script configs that list the
 mainnet / testnet controller (for a TOKEN/BZE copy, change the name under `controllers_config`). Copy the runner to
@@ -610,7 +659,7 @@ impact would pass 1%, one every 3 blocks until the pool is back at 0.9, at most 
 **Run.** `cp conf/scripts/beezee_price_bands_token_bze.yml.example hb/conf/scripts/beezee_price_bands.yml`, replace
 the TOKEN placeholder, set the band, the caps, the reserves and the budgets, fund the wallet with both tokens (plus BZE
 for fees), then `start --v2 beezee_price_bands.yml`. `_token_bze` is a TOKEN/BZE template, `_mainnet` is for
-BZE/USDC.inj and `_testnet` runs on testnet TUSDC/BZE (see "AMM run guide"). Each documents every key; a test loads
+BZE/USDC.inj and `_testnet` runs on testnet TBZE/TUSDC (see "AMM run guide"). Each documents every key; a test loads
 them.
 
 **Testnet.** Use a pair with BZE on one side that has a pool, and a second wallet.
@@ -674,10 +723,10 @@ with `catch_up: false` what was not sold is reported at the end instead of being
 **Run.** `cp conf/scripts/beezee_treasury_twap_token_bze.yml.example hb/conf/scripts/beezee_treasury_twap.yml`,
 replace the TOKEN placeholder, set the side, the amount, the period, the caps and the reserves, fund the wallet (plus
 BZE for fees), then `start --v2 beezee_treasury_twap.yml`. `_token_bze` is a TOKEN/BZE template, `_mainnet` is for
-BZE/USDC.inj and `_testnet` runs on testnet TUSDC/BZE (see "AMM run guide"). Each documents every key; a test loads
+BZE/USDC.inj and `_testnet` runs on testnet TBZE/TUSDC (see "AMM run guide"). Each documents every key; a test loads
 them.
 
-**Testnet.** Use a pair with BZE on one side, and a second wallet. On a pool-only pair (testnet TUSDC/BZE) `venue: best`
+**Testnet.** Use a pair with BZE on one side, and a second wallet. On a pool-only pair (testnet LMN/TBZE) `venue: best`
 trades on the pool alone; the venue comparison below needs a pair with both a pool and a book.
 
 - [ ] Sell down a small total (e.g. 300 TOKEN) over 30 minutes (`duration_hours: 0.5`, `slice_interval_seconds: 300`,
@@ -690,7 +739,7 @@ trades on the pool alone; the venue comparison below needs a pair with both a po
 
 How to run the pool scripts and the pool-anchored controller above. Every one has three ready configs:
 
-| Goal | Script / controller | Testnet (TUSDC/BZE) | Mainnet (BZE/USDC.inj) | Template (TOKEN/BZE) |
+| Goal | Script / controller | Testnet (TBZE/TUSDC) | Mainnet (BZE/USDC.inj) | Template (TOKEN/BZE) |
 |---|---|---|---|---|
 | Keep the pool and the book in line | `scripts/beezee_pool_book_arb.py` | `conf/scripts/beezee_pool_book_arb_testnet.yml.example` | `…_mainnet.yml.example` | `…_token_bze.yml.example` |
 | Quote on the book | `controllers/market_making/beezee_pool_anchored_pmm.py` | `conf/controllers/beezee_pool_anchored_pmm_testnet.yml.example` + `conf/scripts/beezee_pool_anchored_pmm_runner_testnet.yml.example` | `…_mainnet.yml.example` + `…_runner_mainnet.yml.example` | `…_token_bze.yml.example` |
@@ -721,7 +770,8 @@ On BZE a liquidity pool and an order-book market are unrelated: a pool can exist
 community token) and a market with no pool; a pair that has both has them by coincidence. The connector lists a pair
 for every market and for every pool, and `status` shows each script's venues (`order book + pool`, `pool only`,
 `order book only`). A pair keeps the same name whatever venues it has: a market's pair is named after the market, a
-pool-only pair after the pool's two denoms (sorted, as the chain stores the pool), from the denoms' metadata either way.
+pool-only pair after the pool's two denoms (sorted, as the chain stores the pool), from the denoms' labels either way
+(see "Denom labels").
 
 - **Pool only**: pool volume, and bands and TWAP with `venue: pool`, run on any pool, with or without a market.
 - **Book only**: volume target, TWAP with `venue: book` and upstream order-book strategies run on any market, with or
@@ -750,6 +800,13 @@ To trade a pool-only pair on the book too, create its market (`bzed tx tradebin 
   best bid and ask is normal. A best ask below the pool price, or a best bid above it, by more than the pool fee plus
   the fixed fees (2 × 0.1 BZE + gas, as a share of the trade) is an arbitrage the arb script takes. Quotes closer to
   the pool price than its fee can be arbitraged against you: the pool-anchored controller never places them.
+- **A pool can point the other way.** A pool always orders its two denoms alphabetically, while a market's creator
+  picks its base and quote, so a market and its pool can be inverses of each other: mainnet BZE/USDC.inj (pool
+  `ibc/81DA…_ubze`, base USDC.inj) and testnet BZE/TUSDC (pool `factory/…/testusd_ubze`, base TUSDC) are like this.
+  Read the pool in the pair's orientation, never in the pool's: with the pair's base B and quote Q, the pool price
+  p = (pool reserve of Q) / (pool reserve of B), which is `reserve_base / reserve_quote` of the pool when the pool is
+  inverted. Q into the pool pushes p up, B into it pushes p down. An ask on the book sells B and a bid buys B, and
+  every size is in B (BZE on these pairs), whatever the pool's own base is.
 
 ### Funding a wallet and keeping reserves
 
@@ -828,29 +885,44 @@ bot's included; the arb script would take the controller's own quotes). Give eve
   the `stop` is refused with "Invalid strategy. Start aborted.").
 - **TWAP.** With `catch_up: false`, a part the book refunded still stays in what is left and is traded later. Once
   nothing is left, the remaining slices log a "nothing left" skip until the deadline.
-- **USDC.inj pair name.** On mainnet the connector names USDC.inj after its on-chain metadata, so BZE/USDC.inj lists as
-  `BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A` with USDC in base units (see "Pure market making examples").
-  The mainnet configs use that name. It is not final and may change with the metadata; then take the new name from the
-  pair autocomplete.
+- **Pair names.** Pairs are named from the denom labels (see "Denom labels"): BZE/USDC.inj is `BZE-USDC.INJ` with
+  USDC in whole USDC, testnet BZE/TUSDC is `TBZE-TUSDC`. A config with a name from before labels does not start and
+  the log gives the new name.
+- **Pool volume price guard.** A large swap from someone else and its revert both move the pool price, so a push and
+  revert between cycles can skip two cycles in a row, not one.
+- **Startup log.** The one-time "Beezee connector not ready. Pending status flags: …" line can leave out
+  `pools_initialized` when TWAP or bands start: the pools load right after it. This is harmless.
 
 ### Testnet pair
 
-Testnet (`bzetestnet-3`, October 2026) has one order-book market, `ULMN-TUSDC`, which has no pool and no BZE side, so
-none of the AMM scripts can use it. The pools with BZE are TUSDC/BZE (`factory/…/testusd_ubze`, fee 0.2%, about 1.31
-BZE per TUSDC), ULMN/BZE (fee 0.1%) and VDL/BZE (fee 0.3%); the connector lists them as pool-only pairs. The testnet
-configs use **TUSDC/BZE** (`TUSDC-BZE`). Pool volume, price bands and treasury TWAP run on its pool as it is, with no
-market. The arbitrage and the pool-anchored controller need a market too, which has to be created once for them
-(25,000 testnet BZE, paid by the creating wallet):
+Testnet (`bzetestnet-3`, October 2026) has two order-book markets: `LMN-TUSDC`, which has no pool and no BZE side, so
+none of the AMM scripts can use it, and **BZE/TUSDC** (`TBZE-TUSDC`), which the testnet configs use. Its market id is
+`ubze/factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd` (base testnet BZE, quote TUSDC). Its pool is
+`factory/…/testusd_ubze` (fee 0.2%), whose base is TUSDC: the market was created opposite to the pool on purpose, to
+match mainnet BZE/USDC.inj (see "A pool can point the other way" above). Other pools with BZE are LMN/TBZE (fee 0.1%)
+and VDL/TBZE (fee 0.3%); the connector lists them as pool-only pairs.
+
+Reading TBZE-TUSDC (October 2026: about 178,000 TUSDC and 234,000 TBZE in the pool):
+
+- **p** is TUSDC per TBZE, about 0.763: the pool's `reserve_base / reserve_quote` (TUSDC / TBZE), since the pool is
+  inverted. `status` shows it already in the pair's orientation.
+- **TUSDC into the pool pushes p up**, TBZE into it pushes p down.
+- **Asks sell TBZE, bids buy TBZE**, and every size (orders, fills, arb sizes, TWAP slices) is in TBZE. A row of an
+  older checklist written for TUSDC-BZE has its asks and bids swapped and its sizes in TUSDC: translate it.
+- **Arbitrage drift.** When the arb buys on the pool and sells into bids, the pool leg can deliver up to `slippage_pct`
+  less than the fill sold; on this pair that drift lands on the TUSDC side.
+
+The market exists, so skip creating it. On a new testnet, or for another pair, it is created once (25,000 testnet
+BZE, paid by the creating wallet), base first:
 
 ```bash
-bzed tx tradebin create-market factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd ubze \
+bzed tx tradebin create-market ubze factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd \
   --from <test wallet> --keyring-backend test --chain-id bzetestnet-3 \
   --node https://testnet-rpc.getbze.com:443 --gas 300000 --fees 3000ubze
 ```
 
-Then restart the client: the pair keeps its name `TUSDC-BZE` and `status` shows `order book + pool`. Check that
-`/bze/tradebin/all_markets` on `https://testnet.getbze.com` shows it first; once it exists, skip this step. The run
-itself follows "Testnet run" with the config of the script.
+Then restart the client: `status` shows `order book + pool` for the pair. The run itself follows "Testnet run" with the
+config of the script.
 
 ## Connector behaviour on chain v8.2.0
 

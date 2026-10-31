@@ -1,10 +1,10 @@
 #########################################################
-###  Price support bands: testnet TUSDC/BZE           ###
+###  Price support bands: testnet TBZE/TUSDC          ###
 #########################################################
 # Copy to conf/scripts/beezee_price_bands_testnet.yml, set the band around the pool price of the day, then
 #   start --v2 beezee_price_bands_testnet.yml
-# Below floor_price the script buys TUSDC with BZE, above ceiling_price it sells TUSDC for BZE, inside the band it does
-# nothing.
+# Below floor_price the script buys TBZE with TUSDC, above ceiling_price it sells TBZE for TUSDC, inside the band it
+# does nothing.
 # How it works and what it costs: README_BZE.md, sections "Price support bands" and "AMM run guide".
 # Network: bzetestnet-3. In `connect beezee` pick network `testnet` with the endpoints of README_BZE.md "Testnet run"
 # and gas price 0.01 ubze (the testnet minimum; 0.001 is refused).
@@ -14,42 +14,44 @@ controllers_config: []
 
 exchange: beezee
 
-# TUSDC quoted in BZE: pool factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd_ubze (pool fee 0.2%). With
-# venue and price_source on the pool, no TUSDC/BZE order-book market is needed (README_BZE.md, "AMM run guide",
-# testnet pair).
-trading_pair: "TUSDC-BZE"
-
+# Testnet BZE (ubze, labelled TBZE as on testnet-dex.getbze.com) quoted in TUSDC: market
+# ubze/factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd and pool
+# factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd_ubze (pool fee 0.2%). The pool sorts its denoms, so its
+# base is TUSDC: it points the opposite way from the market, and the connector reads it in the pair's orientation
+# (about 0.763 TUSDC per TBZE in October 2026). See README_BZE.md, "AMM run guide", testnet pair.
+# With venue and price_source on the pool, the market is not used.
+trading_pair: "TBZE-TUSDC"
 price_source: pool
 
-# The band, in BZE per TUSDC. The pool was at about 1.31 in October 2026: set these to about 0.3% below and above
-# the pool price `status` shows when you start. The pool holds about 178,000 TUSDC and 234,000 BZE, so moving its
-# price by m% takes a swap of about reserve x m / 200 (0.5% = about 450 TUSDC or 580 BZE), and bringing it back 0.2%
-# takes the bot about 230 BZE of buys.
-floor_price: 1.306
-ceiling_price: 1.314
-
+# The band, in TUSDC per TBZE. The pool was at about 0.763 in October 2026: set these to about 0.3% below and above
+# the pool price `status` shows when you start. The pool holds about 178,000 TUSDC and 234,000 TBZE, so moving its
+# price by m% takes a swap of about reserve x m / 200 (0.5% = about 450 TUSDC or 580 TBZE). TUSDC into the pool
+# pushes the price up, TBZE into it pushes the price down. Bringing the price back up 0.2% from below the floor takes
+# the bot about 180 TUSDC of buys; how much exactly depends on how far below the floor the price starts.
+floor_price: 0.761
+ceiling_price: 0.7656
 venue: pool
 
-# Largest buy, in BZE spent, and largest sell, in TUSDC sold.
-max_trade_quote: 50
-max_trade_base: 40
+# Largest buy, in TUSDC spent, and largest sell, in TBZE sold.
+max_trade_quote: 40
+max_trade_base: 50
 
 # A trade's own price impact, pool fee (0.2%) included, in %.
 max_impact_pct: 1
 
-# Balances the script never spends: BZE (also covers the fees), then TUSDC.
-keep_quote_reserve: 20
-keep_base_reserve: 5
+# Balances the script never spends: TUSDC, then TBZE (also covers the fees).
+keep_quote_reserve: 0
+keep_base_reserve: 20
 
-# BZE all buys may spend and TUSDC all sells may sell per UTC day.
-buy_budget_quote: 400
-sell_budget_base: 300
+# TUSDC all buys may spend and TBZE all sells may sell per UTC day.
+buy_budget_quote: 300
+sell_budget_base: 400
 budget_period: daily
 
 slippage_pct: 0.5
 cooldown_blocks: 3
 check_interval_seconds: 10
 
-# Cost of one trade: the pool fee (0.2% of the input) + 0.1 BZE taker fee + gas (about 200,000 gas x 0.01 ubze =
-# 0.002 BZE).
+# Cost of one trade: the pool fee (0.2% of the input) + 0.1 TBZE taker fee + gas (about 200,000 gas x 0.01 ubze =
+# 0.002 TBZE).
 estimated_gas_bze: 0.005

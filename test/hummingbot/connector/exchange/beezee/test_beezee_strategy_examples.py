@@ -40,8 +40,8 @@ COMMON_SETTINGS = {
 }
 # Pair names as the connector lists them from each network's denom metadata.
 MARKETS = {
-    "beezee_pmm_testnet.yml.example": "ULMN-TUSDC",
-    "beezee_pmm_bze_usdc.yml.example": "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A",
+    "beezee_pmm_testnet.yml.example": "LMN-TUSDC",
+    "beezee_pmm_bze_usdc.yml.example": "BZE-USDC.INJ",
 }
 
 

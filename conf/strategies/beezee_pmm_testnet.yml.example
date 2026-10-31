@@ -11,10 +11,11 @@ strategy: pure_market_making
 
 exchange: beezee
 
-# The only testnet market: ULMN (IBC token, exponent 0) quoted in TUSDC (factory test dollar, exponent 6).
+# LMN (IBC Lumen, 6 decimals from the testnet asset list) quoted in TUSDC (factory test dollar, exponent 6). Pair
+# names use the labels of testnet-dex.getbze.com (README_BZE.md, "Denom labels").
 # Market id: ibc/9DA252F9F9C86132CC282EA431DFB7DE7729501F6DC9A3E0F50EC8C6EE380CC7/factory/bze1z3mkcr2jz424w6m49frgjmy9uhlrx69phqwg3l/testusd
-# Fund the wallet by swapping testnet BZE for ULMN and TUSDC in the dex app's pools.
-market: ULMN-TUSDC
+# Fund the wallet by swapping testnet BZE (TBZE) for LMN and TUSDC in the dex app's pools.
+market: LMN-TUSDC
 
 bid_spread: 1.0
 ask_spread: 1.0
@@ -23,10 +24,10 @@ order_refresh_time: 30
 max_order_age: 1800
 order_refresh_tolerance_pct: 0.2
 
-# ULMN per order. The chain's minimum order is ceil(1 / chain price) x 2 base units (ulmn = ULMN here),
-# with chain price = TUSDC base units per ulmn (e.g. 0.26 -> 8 ULMN).
-# Check it against the lowest bid level, the cheapest price this config places. 1000 ULMN is well above it.
-order_amount: 1000
+# LMN per order. The chain's minimum order is ceil(1 / chain price) x 2 base units (1 ulmn = 0.000001 LMN),
+# with chain price = TUSDC base units per ulmn (e.g. 0.26 -> 8 ulmn = 0.000008 LMN).
+# Check it against the lowest bid level, the cheapest price this config places. 0.001 LMN is well above it.
+order_amount: 0.001
 
 price_ceiling: -1
 price_floor: -1

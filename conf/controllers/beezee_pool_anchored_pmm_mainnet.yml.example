@@ -17,18 +17,15 @@ controller_type: market_making
 connector_name: beezee
 
 # BZE quoted in USDC bridged from Injective (USDC.inj): market ubze/ibc/81DA528F…, pool ibc/81DA528F…_ubze
-# (pool fee 0.1%). USDC.inj has no display unit on chain, so the bot counts it in base units (1 = 0.000001 USDC) and
-# the BZE price shows as about 333 instead of 0.000333.
-# Pair name: the connector names USDC.inj after its current on-chain metadata (symbol ERC20:0XA00C…, no display
-# unit). That naming is not final and may change; if the pair is reported unknown, take the current name from the
-# pair autocomplete (`create`, pick a strategy with `beezee`).
-trading_pair: "BZE-ERC20:0XA00C59FF5A080D2B954D0C75E46E22A0C371235A"
+# (pool fee 0.1%). USDC.inj counts in USDC (6 decimals, from the asset list), so BZE shows at about 0.000333.
+# Pair name: USDC.inj is labelled USDC.INJ, as on dex.getbze.com (README_BZE.md, "Denom labels").
+trading_pair: "BZE-USDC.INJ"
 
-# Budget for all levels together, in the quote token (here USDC.inj base units: 200000000 = 200 USDC), split between
+# Budget for all levels together, in the quote token (here 200 USDC), split between
 # the buy and sell levels by the *_amounts_pct below. Placeholder: size it to your inventory. The sell levels need
 # the BZE, the buy levels the USDC.inj, plus BZE for the fees. The chain refuses an order smaller than
 # ceil(1 / chain price) x 2 base units (about 0.006 BZE here).
-total_amount_quote: 200000000
+total_amount_quote: 200
 
 # Distance of each level from the pool price, as fractions (0.005 = 0.5%). A level closer than the spread floor
 # (pool fee 0.1% + min_spread_over_pool_fee_pct) is placed at the floor instead.

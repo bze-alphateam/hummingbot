@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 import ecdsa
 from bidict import bidict
-from pydantic import ConfigDict, Field, SecretStr, field_validator, model_validator
+from pydantic import ConfigDict, Field, SecretStr, ValidationInfo, field_validator, model_validator
 
 from hummingbot.client.config.config_data_types import BaseClientModel, BaseConnectorConfigMap
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
@@ -530,7 +530,20 @@ class BeezeeConfigMap(BaseConnectorConfigMap):
         ge=1,
         json_schema_extra={"prompt": "Enter the maximum number of order messages in one tx"},
     )
+    # Label per denom, over the labels from the asset list and the metadata (see beezee_denom_labels). Set it in the
+    # connector config file; it is not prompted.
+    denom_labels: Dict[str, str] = Field(default_factory=dict)
     model_config = ConfigDict(title="beezee")
+
+    @field_validator("denom_labels", mode="before")
+    @classmethod
+    def validate_denom_labels(cls, value: Any, info: ValidationInfo):
+        from hummingbot.connector.exchange.beezee.beezee_denom_labels import BeezeeDenomLabels
+
+        labels = {str(denom): str(label) for denom, label in (value or {}).items()}
+        network = info.data.get("network")
+        BeezeeDenomLabels.for_chain(getattr(network, "chain_id", None) or "", labels)
+        return labels
 
     @field_validator("network", mode="before")
     @classmethod
