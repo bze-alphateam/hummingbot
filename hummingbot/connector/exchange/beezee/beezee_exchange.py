@@ -56,6 +56,8 @@ from hummingbot.connector.exchange.beezee.beezee_utils import (
     chain_price_to_display,
     display_price_to_chain,
     minimum_order_size_for_price,
+    check_delegated_account,
+    granter_address_from_account_mode,
     private_key_from_account_mode,
 )
 from hummingbot.connector.exchange_py_base import ExchangePyBase
@@ -180,8 +182,16 @@ class BeezeeExchange(ExchangePyBase):
         account_type = connector_configuration.account_type
         self._signer: Optional[BeezeeSigner] = None
         self._account_address = getattr(account_type, "address", None)
+        # Delegated modes: the account is the granter wallet, and the signer is the bot key that trades it.
+        self._granter_address = granter_address_from_account_mode(account_type)
         private_key_value = private_key_from_account_mode(account_type)
-        if private_key_value is not None:
+        if private_key_value is not None and self._granter_address is not None:
+            # Checked again here: the config check skips the bot key while it is still encrypted.
+            check_delegated_account(account_type, network.address_prefix)
+            self._signer = BeezeeSigner(private_key_value, network.address_prefix)
+            self._account_address = self._granter_address
+            self.logger().info(f"Beezee delegated mode initialized: {self.account_description}.")
+        elif private_key_value is not None:
             self._signer = BeezeeSigner(private_key_value, network.address_prefix)
             configured_address = self._account_address
             signer_address = self._signer.address
@@ -314,6 +324,16 @@ class BeezeeExchange(ExchangePyBase):
         return self._trading_required
 
     @property
+    def account_description(self) -> str:
+        """The traded account for status lines; in delegated mode it also names the bot key that signs."""
+        if self._granter_address is not None and self._signer is not None:
+            return (
+                f"account {self._account_address} (delegated: bot key {self._signer.address}, gas paid by the "
+                f"account's feegrant)"
+            )
+        return f"account {self._account_address or 'None'}"
+
+    @property
     def status_dict(self) -> Dict[str, bool]:
         status = super().status_dict
         status["user_stream_initialized"] = True
@@ -425,6 +445,7 @@ class BeezeeExchange(ExchangePyBase):
                 gas_adjustment=self._gas_adjustment,
                 rpc_endpoint=self._rpc_endpoint,
                 denom_labels=self._denom_labels,
+                granter_address=self._granter_address,
             )
         return self._data_source
 

@@ -6,6 +6,8 @@ from hummingbot.connector.exchange.beezee.beezee_signer import BeezeeSigner
 from hummingbot.connector.exchange.beezee.beezee_utils import (
     DEFAULT_FEES,
     BeezeeConfigMap,
+    BeezeeDelegatedAccountMode,
+    BeezeeDelegatedMnemonicAccountMode,
     BeezeeMainnetNetworkMode,
     BeezeeMnemonicWalletAccountMode,
     BeezeeTestnetNetworkMode,
@@ -15,6 +17,7 @@ from hummingbot.connector.exchange.beezee.beezee_utils import (
     chain_price_to_display,
     derive_private_key_from_mnemonic,
     display_amount_to_chain,
+    granter_address_from_account_mode,
     display_price_to_chain,
     market_from_data,
     minimum_order_size_for_price,
@@ -30,6 +33,11 @@ from hummingbot.core.data_type.trade_fee import TokenAmount
 TEST_MNEMONIC = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 # What `bzed keys export --unarmored-hex` (bzed v8.2.0) gives for TEST_MNEMONIC on m/44'/118'/0'/0/0.
 TEST_MNEMONIC_PRIVATE_KEY = "c4a48e2fce1481cd3294b4490f6678090ea98d3d0e5cd984558ab0968741b104"  # noqa: mock
+TEST_MNEMONIC_ADDRESS = "bze19rl4cm2hmr8afy4kldpxz3fka4jguq0apypkdz"
+# Another public BIP39 test mnemonic, and the address `bzed keys add --recover` (v8.2.0) gives for it.
+OTHER_MNEMONIC = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong"
+OTHER_MNEMONIC_ADDRESS = "bze1am058pdux3hyulcmfgj4m3hhrlfn8nzm6rsvah"
+GRANTER = "bze1k8py7ynzrrnmzqwk2mkz3a6znatmqshdnnsehy"
 
 
 class BeezeeUtilsTests(unittest.TestCase):
@@ -212,3 +220,81 @@ class BeezeeUtilsTests(unittest.TestCase):
     def test_default_fees_are_in_the_bze_symbol(self):
         self.assertEqual([TokenAmount("BZE", Decimal("0.001"))], DEFAULT_FEES.maker_fixed_fees)
         self.assertEqual([TokenAmount("BZE", Decimal("0.1"))], DEFAULT_FEES.taker_fixed_fees)
+
+
+class BeezeeDelegatedAccountModeTests(unittest.TestCase):
+    """The delegated modes, loaded the way Hummingbot loads conf/connectors/beezee.yml (model_validate of the dict)."""
+
+    def _load(self, account_type, network="mainnet"):
+        return BeezeeConfigMap.model_validate({"connector": "beezee", "network": network, "account_type": account_type})
+
+    def test_delegated_mode_loads_from_a_config_file(self):
+        config = self._load({"name": "delegated", "private_key": TEST_MNEMONIC_PRIVATE_KEY, "granter_address": GRANTER})
+
+        self.assertIsInstance(config.account_type, BeezeeDelegatedAccountMode)
+        self.assertEqual(TEST_MNEMONIC_PRIVATE_KEY, private_key_from_account_mode(config.account_type))
+        self.assertEqual(GRANTER, granter_address_from_account_mode(config.account_type))
+
+    def test_delegated_mnemonic_mode_loads_from_a_config_file(self):
+        config = self._load({
+            "name": "delegated_mnemonic", "mnemonic": TEST_MNEMONIC, "passphrase": "", "hd_path": "m/44'/118'/0'/0/0",
+            "granter_address": GRANTER,
+        })
+
+        self.assertIsInstance(config.account_type, BeezeeDelegatedMnemonicAccountMode)
+        self.assertEqual(TEST_MNEMONIC_PRIVATE_KEY, private_key_from_account_mode(config.account_type))
+        self.assertEqual(GRANTER, granter_address_from_account_mode(config.account_type))
+
+    def test_delegated_mnemonic_mode_derives_the_bot_key_as_bzed_does(self):
+        account = BeezeeDelegatedMnemonicAccountMode(mnemonic=OTHER_MNEMONIC, granter_address=GRANTER)
+
+        self.assertEqual(OTHER_MNEMONIC_ADDRESS, BeezeeSigner(private_key_from_account_mode(account), "bze").address)
+
+    def test_wallet_modes_have_no_granter(self):
+        self.assertIsNone(granter_address_from_account_mode(BeezeeWalletAccountMode(private_key=TEST_MNEMONIC_PRIVATE_KEY)))
+        self.assertIsNone(granter_address_from_account_mode(BeezeeMnemonicWalletAccountMode(mnemonic=TEST_MNEMONIC)))
+
+    def test_granter_address_is_required(self):
+        for account_type in (
+            {"name": "delegated", "private_key": TEST_MNEMONIC_PRIVATE_KEY},
+            {"name": "delegated_mnemonic", "mnemonic": TEST_MNEMONIC},
+        ):
+            with self.subTest(mode=account_type["name"]):
+                with self.assertRaisesRegex(ValueError, "granter_address"):
+                    self._load(account_type)
+
+    def test_an_invalid_granter_address_is_refused(self):
+        for bad in (
+            "bze19rl4cm2hmr8afy4kldpxz3fka4jguq0apypkdq",  # checksum
+            "bze1notanaddress",
+            "",
+        ):
+            with self.subTest(granter=bad):
+                with self.assertRaisesRegex(ValueError, "not a valid bech32 address"):
+                    self._load({"name": "delegated", "private_key": TEST_MNEMONIC_PRIVATE_KEY, "granter_address": bad})
+
+    def test_a_granter_with_another_networks_prefix_is_refused(self):
+        # The test mnemonic's own payload, with the Cosmos Hub prefix.
+        with self.assertRaisesRegex(ValueError, "network's prefix 'bze1'"):
+            self._load({
+                "name": "delegated", "private_key": TEST_MNEMONIC_PRIVATE_KEY,
+                "granter_address": "cosmos19rl4cm2hmr8afy4kldpxz3fka4jguq0auqdal4",
+            })
+
+    def test_a_granter_equal_to_the_bot_key_is_refused(self):
+        for account_type in (
+            {"name": "delegated", "private_key": TEST_MNEMONIC_PRIVATE_KEY, "granter_address": TEST_MNEMONIC_ADDRESS},
+            {"name": "delegated_mnemonic", "mnemonic": TEST_MNEMONIC, "granter_address": TEST_MNEMONIC_ADDRESS},
+        ):
+            with self.subTest(mode=account_type["name"]):
+                with self.assertRaisesRegex(ValueError, "is the bot key's own address"):
+                    self._load(account_type)
+
+    def test_delegated_mode_loads_on_testnet(self):
+        config = self._load(
+            {"name": "delegated", "private_key": TEST_MNEMONIC_PRIVATE_KEY, "granter_address": GRANTER},
+            network={"rest_endpoint": "https://testnet-rest.example", "rpc_endpoint": "https://testnet-rpc.example",
+                     "chain_id": CONSTANTS.TESTNET_CHAIN_ID},
+        )
+
+        self.assertEqual(GRANTER, config.account_type.granter_address)

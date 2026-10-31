@@ -22,6 +22,7 @@ from hummingbot.connector.exchange.beezee.beezee_tx import (
     msg_cancel_order,
     msg_create_order,
     msg_fill_orders,
+    msg_exec,
     msg_multi_swap,
 )
 from hummingbot.connector.exchange.beezee.beezee_utils import (
@@ -97,6 +98,7 @@ class BeezeeAPIDataSource:
         gas_adjustment: Decimal = CONSTANTS.DEFAULT_GAS_ADJUSTMENT,
         rpc_endpoint: Optional[str] = None,
         denom_labels: Optional[BeezeeDenomLabels] = None,
+        granter_address: Optional[str] = None,
     ):
         self._api_factory = api_factory
         self._rest_endpoint = rest_endpoint.rstrip("/")
@@ -106,8 +108,11 @@ class BeezeeAPIDataSource:
         self._native_denom = native_denom
         self._gas_price = gas_price
         self._gas_adjustment = gas_adjustment
-        self._account_address = account_address or (signer.address if signer is not None else None)
         self._signer = signer
+        # Delegated mode: the account is the granter, whose messages the signer (the bot key) sends in an authz
+        # MsgExec, with the gas paid by the granter's feegrant. Otherwise the account is the signer's own wallet.
+        self._granter_address = granter_address
+        self._account_address = granter_address or account_address or (signer.address if signer is not None else None)
         self._metadata_by_denom: Dict[str, Dict[str, Any]] = {}
         self._markets_by_id: Dict[str, BeezeeMarket] = {}
         self._pairs_by_trading_pair: Dict[str, BeezeePair] = {}
@@ -142,6 +147,21 @@ class BeezeeAPIDataSource:
     @property
     def account_address(self) -> Optional[str]:
         return self._account_address
+
+    @property
+    def is_delegated(self) -> bool:
+        return self._granter_address is not None
+
+    @property
+    def _signer_address(self) -> Optional[str]:
+        # The account whose number, sequence and public key sign the txs.
+        return self._signer.address if self._signer is not None else self._account_address
+
+    def _tx_messages(self, messages: List[bytes]) -> List[bytes]:
+        """The messages as they go into the tx body: in delegated mode one MsgExec holding all of them, in order."""
+        if self._granter_address is None:
+            return messages
+        return [msg_exec(self._signer.address, messages)]
 
     async def _request(self, path_url: str, params: Optional[Dict[str, Any]] = None, data: Optional[Dict[str, Any]] = None, method: RESTMethod = RESTMethod.GET, limit_id: Optional[str] = None, return_err: bool = False, headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         rest_assistant = await self._api_factory.get_rest_assistant()
@@ -433,11 +453,12 @@ class BeezeeAPIDataSource:
         return (await self._request(CONSTANTS.ALL_USER_DUST_PATH_URL, params={"address": self._account_address})).get("list", [])
 
     async def get_account_info(self, refresh: bool = False) -> BeezeeAccountInfo:
-        if self._account_address is None:
+        """The signer's account number and next sequence (the bot key's in delegated mode)."""
+        if self._signer_address is None:
             raise ValueError("Beezee account address is required for trading.")
         if not refresh and self._cached_account_number is not None and self._next_account_sequence is not None:
             return BeezeeAccountInfo(account_number=self._cached_account_number, sequence=self._next_account_sequence)
-        response = await self._request(f"{CONSTANTS.ACCOUNT_INFO_PATH_URL}/{self._account_address}")
+        response = await self._request(f"{CONSTANTS.ACCOUNT_INFO_PATH_URL}/{self._signer_address}")
         account = response.get("account", {})
         base_account = account.get("base_account") or account.get("value") or account
         account_info = BeezeeAccountInfo(account_number=int(base_account["account_number"]), sequence=int(base_account["sequence"]))
@@ -492,7 +513,9 @@ class BeezeeAPIDataSource:
     async def simulate_gas(self, messages: List[bytes], sequence: int, memo: str = "") -> int:
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required to simulate transactions.")
-        tx_bytes = build_simulation_transaction(self._signer.public_key_bytes, sequence, messages, memo=memo)
+        tx_bytes = build_simulation_transaction(
+            self._signer.public_key_bytes, sequence, self._tx_messages(messages), memo=memo, fee_granter=self._granter_address
+        )
         try:
             response = await self._request(
                 CONSTANTS.SIMULATE_TX_PATH_URL,
@@ -519,6 +542,9 @@ class BeezeeAPIDataSource:
         resets the cached sequence and retries once; any other refusal raises BeezeeTxRefusedError. Any failure
         before the broadcast resets the cached sequence. Calls are serialized from sequence reservation to
         broadcast, so concurrent orders get consecutive sequences.
+
+        In delegated mode the simulated and the signed tx both carry one MsgExec holding `messages` and the fee
+        granter, so a missing grant or allowance is refused in simulation.
         """
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required to sign transactions.")
@@ -566,35 +592,36 @@ class BeezeeAPIDataSource:
             chain_id=self._chain_id,
             account_number=account.account_number,
             sequence=account.sequence,
-            messages=messages,
+            messages=self._tx_messages(messages),
             fee_denom=self._native_denom,
             fee_amount=fee_amount,
             gas_limit=gas_limit,
             memo=memo,
+            fee_granter=self._granter_address,
         ), fee_amount
 
     def create_order_message(self, market: BeezeeMarket, order_type: str, amount: Decimal, price: Decimal) -> bytes:
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required for order creation.")
-        return msg_create_order(self._signer.address, order_type, display_amount_to_chain(amount, market.base), display_price_to_chain(price, market), market.market_id)
+        return msg_create_order(self._account_address, order_type, display_amount_to_chain(amount, market.base), display_price_to_chain(price, market), market.market_id)
 
     def cancel_order_message(self, market_id: str, order_type: str, order_id: str) -> bytes:
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required for cancels.")
-        return msg_cancel_order(self._signer.address, market_id, order_id, order_type)
+        return msg_cancel_order(self._account_address, market_id, order_id, order_type)
 
     def multi_swap_message(self, pool_id: str, input_denom: str, input_amount: int, output_denom: str, min_output_amount: int) -> bytes:
         """A MsgMultiSwap on the single pool `pool_id`. Amounts are in base units."""
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required for swaps.")
-        return msg_multi_swap(self._signer.address, [pool_id], input_denom, str(input_amount), output_denom, str(min_output_amount))
+        return msg_multi_swap(self._account_address, [pool_id], input_denom, str(input_amount), output_denom, str(min_output_amount))
 
     def fill_orders_message(self, market: BeezeeMarket, order_type: str, orders: List[Tuple[str, int]]) -> bytes:
         """A MsgFillOrders taking resting `order_type` orders at exactly each (chain price, base amount) entry."""
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required for fills.")
         return msg_fill_orders(
-            self._signer.address, market.market_id, order_type, [(price, str(amount)) for price, amount in orders]
+            self._account_address, market.market_id, order_type, [(price, str(amount)) for price, amount in orders]
         )
 
     async def broadcast_create_order(self, market: BeezeeMarket, order_type: str, amount: Decimal, price: Decimal, memo: str = "") -> Dict[str, Any]:
