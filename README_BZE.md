@@ -7,7 +7,8 @@ This is the BeeZee team's fork of [Hummingbot](https://github.com/hummingbot/hum
 The connector was written by [qf3l3k](https://github.com/qf3l3k) in
 [qf3l3k/hummingbot_beezee](https://github.com/qf3l3k/hummingbot_beezee) and imported here from v0.4.0 (`f9b169f`).
 Its own documentation lives in [`hummingbot/connector/exchange/beezee/README.md`](hummingbot/connector/exchange/beezee/README.md),
-with an example of the config shape in `hummingbot/connector/exchange/beezee/beezee.example.yml`.
+with an example of the config shape in `hummingbot/connector/exchange/beezee/beezee.example.yml` (delegated trading:
+`beezee.delegated.example.yml` beside it).
 
 ## Branch model
 
@@ -94,7 +95,7 @@ The rule of "One wallet per bot" (see the AMM run guide) holds here too: one gra
 does not trade the bot's pair by hand from that wallet while it runs (a restarted bot adopts every open order of the
 account on its pair). Every bot gets its own bot key, never shared between bots. Without the grants (authz for the
 tradebin messages, a feegrant allowance that allows `/cosmos.authz.v1beta1.MsgExec`) the chain refuses the
-simulation and nothing is sent. The grant and revoke commands follow in the delegated run guide.
+simulation and nothing is sent. The grant, check and revoke commands follow in "Delegated trading" below.
 
 #### When grants are revoked, expire or run out
 
@@ -127,6 +128,158 @@ check makes the connector ready again, with one log line that delegated trading 
 A read that fails (node down) keeps the last known state. When a grant or the allowance expires within 72 hours the log
 warns once per item. `BeezeeExchange.delegation_status` gives the state, the earliest expiry and, for a spend-limited
 allowance, what it can still spend in BZE.
+
+### Delegated trading
+
+How a user lets a bot key trade their wallet, with the `bzed` CLI (v8.2.0 or later). The user runs every command
+below from their own wallet (`<user>`, a key in their `bzed` keyring); the bot operator only hands over the bot key's
+address (`<bot>`). The rules the connector applies to the grants are in "When grants are revoked, expire or run out"
+above.
+
+#### What the user grants
+
+- Four authz `generic` grants, one for each of `/bze.tradebin.MsgCreateOrder`, `/bze.tradebin.MsgCancelOrder`,
+  `/bze.tradebin.MsgMultiSwap` and `/bze.tradebin.MsgFillOrders`, each with an expiry. All four are needed whatever the
+  strategy runs.
+- One feegrant allowance limited to `/cosmos.authz.v1beta1.MsgExec`, with a total spend limit, a daily period limit
+  and an expiry. The gas is paid from the user's own BZE balance, up to those limits, so the wallet keeps some BZE
+  for it.
+
+That is all the bot key can do with the wallet: place and cancel orders, swap in pools and fill orders, with the
+wallet's funds and in the wallet's name. It can **never** send coins, IBC-transfer, withdraw, stake, vote, or add or
+remove liquidity: no grant covers those messages, so the chain refuses them. The feegrant pays only for `MsgExec`
+txs, never for anything else the bot key signs.
+
+#### The bot key
+
+A fresh key that never holds funds, made by whoever runs the bot:
+
+```bash
+bzed keys add <bot-key-name>
+```
+
+Keep the printed mnemonic for `connect beezee` (mode `delegated_mnemonic`), or export the hex key for mode
+`delegated` with `bzed keys export <bot-key-name> --unarmored-hex --unsafe`. Hand only the address (`<bot>`) to the
+user. The key needs no balance: the feegrant grant below creates its account on chain. One bot key per bot, never
+shared between bots, and the user's wallet runs one bot and is not traded by hand on that pair while the bot runs
+(see "Delegated account").
+
+#### Grant
+
+Set the addresses, the expiry (30 days is a good default; renew before it runs out) and the limits. The examples use
+testnet (`bzetestnet-3`); on mainnet use chain id `beezee-1` and a mainnet RPC. `date -d` is GNU date (on macOS use
+`gdate`).
+
+```bash
+GRANTER=<user>    # the user's wallet: the bze1... address of a key in the bzed keyring
+BOT=<bot>         # the bot key's bze1... address
+EXP=$(date -u -d '+30 days' +%s)                    # authz expiry, Unix seconds
+EXP_RFC=$(date -u -d "@$EXP" +%Y-%m-%dT%H:%M:%SZ)  # the same instant in RFC 3339, for the feegrant
+SPEND=60000000ubze  # total gas the allowance may pay (60 BZE)
+DAILY=2000000ubze   # gas it may pay per day (2 BZE)
+NET="--chain-id bzetestnet-3 --node https://testnet-rpc.getbze.com:443"
+```
+
+**In one tx (recommended).** Build the five messages unsigned, merge them with `jq`, then sign and broadcast once:
+
+```bash
+i=0
+for type in MsgCreateOrder MsgCancelOrder MsgMultiSwap MsgFillOrders; do
+  i=$((i + 1))
+  bzed tx authz grant "$BOT" generic --msg-type=/bze.tradebin.$type --expiration="$EXP" \
+    --from "$GRANTER" $NET --generate-only > grant-$i.json
+done
+bzed tx feegrant grant "$GRANTER" "$BOT" --spend-limit="$SPEND" --period=86400 --period-limit="$DAILY" \
+  --expiration="$EXP_RFC" --allowed-messages=/cosmos.authz.v1beta1.MsgExec \
+  --gas=600000 --gas-prices=0.01ubze $NET --generate-only > grant-5.json
+# the feegrant file carries the fee (600000 gas x 0.01 = 6000 ubze); its body gets all five messages
+jq -s '.[4].body.messages = [.[].body.messages[]] | .[4]' \
+  grant-1.json grant-2.json grant-3.json grant-4.json grant-5.json > grants.json
+bzed tx sign grants.json --from "$GRANTER" $NET --output-document grants-signed.json
+bzed tx broadcast grants-signed.json $NET
+```
+
+`bzed tx sign` reads the wallet's account number and sequence from the node. Check that `grants.json` lists four `/cosmos.authz.v1beta1.MsgGrant` and one
+`/cosmos.feegrant.v1beta1.MsgGrantAllowance` before signing:
+`jq -r '.body.messages[]."@type"' grants.json`.
+
+**One tx per grant.** The same five commands without `--generate-only`, each signed and broadcast on its own:
+
+```bash
+for type in MsgCreateOrder MsgCancelOrder MsgMultiSwap MsgFillOrders; do
+  bzed tx authz grant "$BOT" generic --msg-type=/bze.tradebin.$type --expiration="$EXP" \
+    --from "$GRANTER" --gas-prices=0.01ubze $NET
+done
+bzed tx feegrant grant "$GRANTER" "$BOT" --spend-limit="$SPEND" --period=86400 --period-limit="$DAILY" \
+  --expiration="$EXP_RFC" --allowed-messages=/cosmos.authz.v1beta1.MsgExec --gas-prices=0.01ubze $NET
+```
+
+`bzed tx feegrant grant` takes the granter as its first argument and ignores `--from`.
+
+**Sizing the limits.** Each bot tx pays its gas limit (the simulated gas times `gas_adjustment`, 1.3 by default) times
+the gas price, 0.01 ubze on testnet. A tx with one order is about 130,000 gas, i.e. about 0.0013 BZE; a batch with more
+orders costs more, but much less than one tx per order. Run the bot for an hour, then read the gas it paid: the beezee
+scripts print it in `status` (the gas on their spend or fees line); for a plain strategy, add up the fees of the
+wallet's recent txs in the explorer (the wallet is their fee payer). Scale that to a day and set `DAILY` to about twice
+it, and `SPEND` to `DAILY` times the days until the expiry. Both are in ubze (1 BZE = 1,000,000 ubze). A spent limit
+only stops the bot (see "When grants are revoked, expire or run out"); it never costs more than the limit.
+
+**Renewing.** Running the authz grant again for a type replaces that grant, with the new expiry. A feegrant allowance
+cannot be replaced while it exists: revoke it, then grant it again (both can go in one tx with the same `jq` merge).
+
+#### Check
+
+```bash
+bzed q authz grants "$GRANTER" "$BOT" $NET
+bzed q feegrant grant "$GRANTER" "$BOT" $NET
+```
+
+The first lists the four grants, each with its `msg` type and `expiration`. The second shows the allowance:
+`allowed_messages: [/cosmos.authz.v1beta1.MsgExec]` around a `PeriodicAllowance` with the `spend_limit` left, its
+`expiration`, `period_can_spend` (left today) and `period_reset`. With no allowance it fails with
+`fee-grant not found`. Both queries take addresses, not key names.
+
+In the bot:
+
+- the startup log names the account and the bot key, and logs once whether the grants are valid;
+- while the grants are missing, expired or spent, `start` and `status` list the connector as not ready with the row
+  `delegation_grants_valid False`, and the log says once what is missing;
+- 72 hours before a grant or the allowance expires, the log warns once per item;
+- the scripts' `status` shows the gas paid since they started; what is left of the allowance is in
+  `bzed q feegrant grant` above.
+
+#### Revoke
+
+```bash
+for type in MsgCreateOrder MsgCancelOrder MsgMultiSwap MsgFillOrders; do
+  bzed tx authz revoke "$BOT" /bze.tradebin.$type --from "$GRANTER" --gas-prices=0.01ubze $NET
+done
+bzed tx feegrant revoke "$GRANTER" "$BOT" --gas-prices=0.01ubze $NET
+```
+
+Revoking any one of them is enough to stop the bot; revoking all five removes every right it had. Like the grants,
+the five revokes can be built with `--generate-only` and merged into one tx with `jq`.
+
+What follows: the connector notices within one tx (the chain refuses it) or at its next 5-minute check, turns not
+ready and sends nothing more. **Resting orders stay on the book, in the user's wallet.** The user cancels them from
+the wallet, in the dex app (dex.getbze.com; testnet: testnet-dex.getbze.com) or with
+`bzed tx tradebin cancel-order <market-id> <order-id> <buy|sell> --from "$GRANTER" --gas-prices=0.01ubze $NET`.
+Granting again later resumes the bot within 5 minutes, without a restart.
+
+#### Connecting the bot
+
+`connect beezee` asks for the network as in "Testnet run", then the account type. Answer `delegated_mnemonic` and the
+client asks, in this order:
+
+1. the bot key's mnemonic,
+2. the bot key's mnemonic passphrase (optional, Enter for none),
+3. the bot key's HD derivation path (Enter for the default `m/44'/118'/0'/0/0`),
+4. "the Beezee wallet the bot trades for (the authz and feegrant granter)": `<user>`.
+
+`delegated` asks for the bot key's hex private key, then the same granter address. The client encrypts the key into
+`conf/connectors/beezee.yml`. `hummingbot/connector/exchange/beezee/beezee.delegated.example.yml` shows the resulting
+config shape with placeholders. Then `balance` shows the user wallet's balances, and strategies and scripts run as in
+wallet mode.
 
 ## Denom labels
 
