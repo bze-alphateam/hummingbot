@@ -3,7 +3,7 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Set, Tuple
 from urllib.parse import quote
 
 from aiohttp import ContentTypeError
@@ -65,6 +65,16 @@ class BeezeeTxRefusedError(IOError):
     @property
     def is_denom_halted(self) -> bool:
         return is_denom_halted_error(self.code, self.codespace, self.chain_message)
+
+
+class BeezeeTxGuard(Protocol):
+    """Watches the txs of a data source: it can stop a tx before it is sent and hears of every refusal."""
+
+    def check_tx_allowed(self):
+        """Raises BeezeeTxRefusedError with stage CONSTANTS.DELEGATION_STAGE when no tx may be sent now."""
+
+    def on_tx_refused(self, error: "BeezeeTxRefusedError"):
+        """Called once for each tx the chain refused (after the sequence-mismatch retry), before the error is raised."""
 
 
 def is_not_found_error(error: Exception) -> bool:
@@ -132,6 +142,7 @@ class BeezeeAPIDataSource:
         self._queue_message_scan_gas = CONSTANTS.DEFAULT_QUEUE_MESSAGE_SCAN_GAS
         # Gas fees of the txs accepted at broadcast, in base units of the native denom.
         self._gas_fees_paid = 0
+        self._tx_guard: Optional[BeezeeTxGuard] = None
 
     @classmethod
     def logger(cls):
@@ -141,8 +152,27 @@ class BeezeeAPIDataSource:
     def gas_fees_paid(self) -> Decimal:
         """Gas fees of every tx this data source broadcast and the node accepted, in display units of the native
         token. A tx accepted at broadcast pays its fee even when its messages fail in the block."""
+        return self.native_amount_to_display(self._gas_fees_paid)
+
+    @property
+    def native_denom(self) -> str:
+        return self._native_denom
+
+    @property
+    def native_symbol(self) -> str:
+        return self._native_token().symbol
+
+    def native_amount_to_display(self, amount: int) -> Decimal:
+        """An amount of the native denom's base units (ubze) in its display units (BZE)."""
+        return chain_amount_to_display(amount, self._native_token())
+
+    def _native_token(self) -> BeezeeToken:
         metadata = self._metadata_by_denom.get(self._native_denom) or self._fallback_metadata_for_denom(self._native_denom)
-        return chain_amount_to_display(self._gas_fees_paid, self._denom_labels.token(self._native_denom, metadata))
+        return self._denom_labels.token(self._native_denom, metadata)
+
+    def set_tx_guard(self, guard: Optional[BeezeeTxGuard]):
+        """The guard asked before every tx and told of every refusal (the delegated modes' grant checks)."""
+        self._tx_guard = guard
 
     @property
     def account_address(self) -> Optional[str]:
@@ -452,6 +482,32 @@ class BeezeeAPIDataSource:
             return []
         return (await self._request(CONSTANTS.ALL_USER_DUST_PATH_URL, params={"address": self._account_address})).get("list", [])
 
+    async def get_authz_grants(self) -> List[Dict[str, Any]]:
+        """Every authz grant the granter gave the bot key (delegated modes), expired ones included until the chain
+        prunes them. Read errors raise."""
+        if self._granter_address is None or self._signer is None:
+            raise ValueError("Beezee delegated mode is required to read authz grants.")
+        return await self._paged_request(
+            CONSTANTS.AUTHZ_GRANTS_PATH_URL, "grants", params={"granter": self._granter_address, "grantee": self._signer.address}
+        )
+
+    async def get_fee_allowance(self) -> Optional[Dict[str, Any]]:
+        """The feegrant allowance the granter gave the bot key (the `allowance` Any inside the grant), or None when
+        there is none: the node answers that with HTTP 500 and "fee-grant not found". Other read errors raise."""
+        if self._granter_address is None or self._signer is None:
+            raise ValueError("Beezee delegated mode is required to read the fee allowance.")
+        try:
+            response = await self._request(
+                f"{CONSTANTS.FEE_ALLOWANCE_PATH_URL}/{self._granter_address}/{self._signer.address}",
+                limit_id=CONSTANTS.FEE_ALLOWANCE_PATH_URL,
+            )
+        except IOError as error:
+            message = str(error).lower()
+            if "http status is 500" in message and CONSTANTS.FEE_GRANT_NOT_FOUND_MESSAGE in message:
+                return None
+            raise
+        return (response.get("allowance") or {}).get("allowance")
+
     async def get_account_info(self, refresh: bool = False) -> BeezeeAccountInfo:
         """The signer's account number and next sequence (the bot key's in delegated mode)."""
         if self._signer_address is None:
@@ -544,11 +600,23 @@ class BeezeeAPIDataSource:
         broadcast, so concurrent orders get consecutive sequences.
 
         In delegated mode the simulated and the signed tx both carry one MsgExec holding `messages` and the fee
-        granter, so a missing grant or allowance is refused in simulation.
+        granter, so a missing grant or allowance is refused in simulation. The tx guard, when set, may stop the tx
+        before anything is sent, and hears of every refusal.
         """
         if self._signer is None:
             raise ValueError("Beezee wallet mode is required to sign transactions.")
+        try:
+            return await self._simulate_sign_and_broadcast(messages, memo, extra_gas)
+        except BeezeeTxRefusedError as error:
+            if self._tx_guard is not None and error.stage != CONSTANTS.DELEGATION_STAGE:
+                self._tx_guard.on_tx_refused(error)
+            raise
+
+    async def _simulate_sign_and_broadcast(self, messages: List[bytes], memo: str, extra_gas: int) -> Dict[str, Any]:
         async with self._tx_lock:
+            # Asked under the lock: a tx that waited for the one refused before it is stopped too.
+            if self._tx_guard is not None:
+                self._tx_guard.check_tx_allowed()
             for attempt in range(2):
                 account = await self.reserve_account_info_sequence()
                 try:

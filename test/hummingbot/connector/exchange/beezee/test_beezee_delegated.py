@@ -50,15 +50,45 @@ METADATA = {
 }
 
 
+def valid_grants() -> Dict[str, Any]:
+    """The authz grants response of a granter that gave the bot key every tradebin message, without expiry."""
+    return {
+        "grants": [
+            {"authorization": {"@type": "/cosmos.authz.v1beta1.GenericAuthorization", "msg": message_type}, "expiration": None}
+            for message_type in CONSTANTS.DELEGATED_MESSAGE_TYPE_URLS
+        ],
+        "pagination": {"next_key": None, "total": "4"},
+    }
+
+
+def grants_url() -> re.Pattern:
+    return re.compile(rf"^{re.escape(REST_URL + CONSTANTS.AUTHZ_GRANTS_PATH_URL)}\?.*$")
+
+
+def allowance_url() -> str:
+    return f"{REST_URL}{CONSTANTS.FEE_ALLOWANCE_PATH_URL}/{ADDRESS}/{BOT_ADDRESS}"
+
+
+def unlimited_allowance() -> Dict[str, Any]:
+    return {"allowance": {"granter": ADDRESS, "grantee": BOT_ADDRESS, "allowance": {
+        "@type": "/cosmos.feegrant.v1beta1.BasicAllowance", "spend_limit": [], "expiration": None,
+    }}}
+
+
 class DelegatedAccountMixin:
-    """Runs a connector suite in delegated mode: the bot key signs for ADDRESS (the granter). After every test, each tx
-    the connector simulated or broadcast must be one MsgExec from the bot key, with ADDRESS as the fee granter and as
-    the creator of every inner message (decode_tx checks the creators)."""
+    """Runs a connector suite in delegated mode: the bot key signs for ADDRESS (the granter), which gave it every grant.
+    After every test, each tx the connector simulated or broadcast must be one MsgExec from the bot key, with ADDRESS
+    as the fee granter and as the creator of every inner message (decode_tx checks the creators)."""
 
     signer_address = BOT_ADDRESS
 
     def _account_type(self):
         return BeezeeDelegatedMnemonicAccountMode(mnemonic=BOT_MNEMONIC, granter_address=ADDRESS)
+
+    def _mock_chain_state(self):
+        super()._mock_chain_state()
+        self.mock_api.get(grants_url(), repeat=True, payload=valid_grants())
+        self.mock_api.get(allowance_url(), repeat=True, payload=unlimited_allowance())
 
     def _posted_txs(self) -> List[SentTx]:
         sent = []

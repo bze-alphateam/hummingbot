@@ -96,6 +96,38 @@ account on its pair). Every bot gets its own bot key, never shared between bots.
 tradebin messages, a feegrant allowance that allows `/cosmos.authz.v1beta1.MsgExec`) the chain refuses the
 simulation and nothing is sent. The grant and revoke commands follow in the delegated run guide.
 
+#### When grants are revoked, expire or run out
+
+The bot needs, from the account (granter) to its bot key (grantee):
+
+- an authz `GenericAuthorization` for each of `/bze.tradebin.MsgCreateOrder`, `/bze.tradebin.MsgCancelOrder`,
+  `/bze.tradebin.MsgMultiSwap` and `/bze.tradebin.MsgFillOrders`, all four whatever the strategy;
+- one feegrant allowance: a `BasicAllowance`, a `PeriodicAllowance`, or an `AllowedMsgAllowance` wrapping either that
+  lists `/cosmos.authz.v1beta1.MsgExec` (the chain checks the tx's outer message, so a list of tradebin messages alone
+  refuses every tx). It must not be expired and must have ubze left to spend (an empty spend limit is unlimited).
+
+The connector reads them before it reports ready, every 5 minutes after that, and once right after the chain refuses a
+tx because of them (authz: authorization not found or expired; feegrant: fee limit exceeded, allowance expired, no
+allowance, message not allowed). A grant past its expiration counts as missing even while the chain still lists it.
+
+While anything is missing, expired or spent:
+
+- the connector is not ready: its `status_dict` shows `delegation_grants_valid: False`, so strategies, scripts and
+  controllers stop placing orders, and the log says once what is wrong (the missing or expired message types, or the
+  allowance problem);
+- it sends no orders, cancels, swaps or fills: cancels need the grants and the allowance too. The tx that discovered
+  the problem fails like any refused tx; nothing is retried;
+- **resting orders stay on the book.** They belong to the account: cancel them from the account's own wallet if
+  needed (e.g. in the dapp at dex.getbze.com).
+
+Renew the grants (only the account owner can: the bot never asks for, renews or widens them) and the next 5-minute
+check makes the connector ready again, with one log line that delegated trading resumed. No restart is needed. A spent
+`spend_limit` passes simulation (the simulated fee is zero) and is caught at broadcast, so it costs no fee.
+
+A read that fails (node down) keeps the last known state. When a grant or the allowance expires within 72 hours the log
+warns once per item. `BeezeeExchange.delegation_status` gives the state, the earliest expiry and, for a spend-limited
+allowance, what it can still spend in BZE.
+
 ## Denom labels
 
 The connector names every denom the way the BeeZee dapps do, so pairs, balances, `status` and the logs show the
