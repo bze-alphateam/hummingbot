@@ -48,10 +48,17 @@ class BeezeeAccountInfo:
     sequence: int
 
 
+def printable_chain_message(message: str) -> str:
+    """`message` with every non-printable character replaced by "?". Some chain errors embed raw address bytes (e.g.
+    the feegrant "fee limit exceeded" text), which arrive as control or replacement characters."""
+    return "".join(char if char.isprintable() and char != "\ufffd" else "?" for char in message)
+
+
 class BeezeeTxRefusedError(IOError):
     """The chain refused a transaction, either in simulation or at broadcast (CheckTx)."""
 
     def __init__(self, stage: str, message: str, code: Optional[int] = None, codespace: Optional[str] = None):
+        message = printable_chain_message(message)
         super().__init__(f"Beezee tx {stage} failed: {message}")
         self.stage = stage
         self.chain_message = message
@@ -592,8 +599,9 @@ class BeezeeAPIDataSource:
     async def simulate_sign_and_broadcast(self, messages: List[bytes], memo: str = "", extra_gas: int = 0) -> Dict[str, Any]:
         """Simulates the messages for gas, then signs and broadcasts them in a single tx.
 
-        gas limit = ceil(gas_used * gas_adjustment) + extra_gas, fee = ceil(gas limit * gas_price) in the native denom.
-        `extra_gas` covers what the simulation cannot see, e.g. messages queued earlier in the same block.
+        gas limit = ceil(gas_used * gas_adjustment) + extra_gas + FEE_DEDUCTION_GAS, fee = ceil(gas limit * gas_price)
+        in the native denom. `extra_gas` covers what the simulation cannot see, e.g. messages queued earlier in the same
+        block. FEE_DEDUCTION_GAS covers the fee deduction, which the zero-fee simulation skips.
         A refused simulation is never broadcast. An account sequence mismatch, in simulation or at broadcast,
         resets the cached sequence and retries once; any other refusal raises BeezeeTxRefusedError. Any failure
         before the broadcast resets the cached sequence. Calls are serialized from sequence reservation to
@@ -653,7 +661,7 @@ class BeezeeAPIDataSource:
         self, messages: List[bytes], account: BeezeeAccountInfo, memo: str, extra_gas: int
     ) -> Tuple[bytes, str]:
         gas_used = await self.simulate_gas(messages, account.sequence, memo=memo)
-        gas_limit = gas_limit_from_simulation(gas_used, self._gas_adjustment) + extra_gas
+        gas_limit = gas_limit_from_simulation(gas_used, self._gas_adjustment) + extra_gas + CONSTANTS.FEE_DEDUCTION_GAS
         fee_amount = fee_amount_from_gas(gas_limit, self._gas_price)
         return build_signed_transaction(
             signer=self._signer,

@@ -221,7 +221,7 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
             [build_simulate_request(build_simulation_transaction(self.signer.public_key_bytes, 3, self.messages, memo="hbot:OID1"))],
             simulated,
         )
-        # gas limit = ceil(100001 * 1.3) = 130002; fee = ceil(130002 * 0.01) = 1301 ubze
+        # gas limit = ceil(100001 * 1.3) + 30000 fee deduction = 160002; fee = ceil(160002 * 0.01) = 1601 ubze
         expected_tx = build_signed_transaction(
             signer=self.signer,
             chain_id="beezee-1",
@@ -229,8 +229,8 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
             sequence=3,
             messages=self.messages,
             fee_denom="ubze",
-            fee_amount="1301",
-            gas_limit=130002,
+            fee_amount="1601",
+            gas_limit=160002,
             memo="hbot:OID1",
         )
         self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
@@ -243,7 +243,7 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
 
         await self.data_source.simulate_sign_and_broadcast(self.messages, memo="hbot:OID1", extra_gas=6221)
 
-        # gas limit = ceil(100001 * 1.3) + 6221 = 136223; fee = ceil(136223 * 0.01) = 1363 ubze
+        # gas limit = ceil(100001 * 1.3) + 6221 + 30000 fee deduction = 166223; fee = ceil(166223 * 0.01) = 1663 ubze
         expected_tx = build_signed_transaction(
             signer=self.signer,
             chain_id="beezee-1",
@@ -251,11 +251,72 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
             sequence=3,
             messages=self.messages,
             fee_denom="ubze",
-            fee_amount="1363",
-            gas_limit=136223,
+            fee_amount="1663",
+            gas_limit=166223,
             memo="hbot:OID1",
         )
         self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
+
+    @aioresponses()
+    async def test_lone_cancel_gas_limit_covers_the_fee_deduction_the_simulation_skips(self, mock_api):
+        # Measured on testnet: a lone cancel simulated 58,345 gas (zero fee, so no fee deduction) and used 76,172 in
+        # the real tx. Without the fee deduction gas its limit was ceil(58345 * 1.3) = 75,849: out of gas.
+        self._mock_account(mock_api, sequence=3)
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "58345"}})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "AB" * 32}})
+        cancel = self.data_source.cancel_order_message("ubze/uusdc", "buy", "000000000000000000000042")
+
+        await self.data_source.broadcast_cancel_order("ubze/uusdc", "buy", "000000000000000000000042")
+
+        # gas limit = 75849 + 30000 = 105849; fee = ceil(105849 * 0.01) = 1059 ubze
+        expected_tx = build_signed_transaction(
+            signer=self.signer,
+            chain_id="beezee-1",
+            account_number=7,
+            sequence=3,
+            messages=[cancel],
+            fee_denom="ubze",
+            fee_amount="1059",
+            gas_limit=105849,
+        )
+        self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
+
+    @aioresponses()
+    async def test_refusal_text_with_raw_bytes_is_made_printable(self, mock_api):
+        # The feegrant error embeds raw address bytes, which reach the REST response as control and replacement
+        # characters.
+        raw_log = "\x14\ufffd\x03k\x7fé does not allow to pay fees for \x01\ufffd\x9c\t: fee limit exceeded"
+        self._mock_account(mock_api, sequence=3)
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "100000"}})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 2, "codespace": "feegrant", "raw_log": raw_log, "txhash": ""}})
+
+        with self.assertRaises(BeezeeTxRefusedError) as context:
+            await self.data_source.simulate_sign_and_broadcast(self.messages)
+
+        self.assertEqual("???k?é does not allow to pay fees for ????: fee limit exceeded", context.exception.chain_message)
+        self.assertEqual(
+            "Beezee tx broadcast failed: ???k?é does not allow to pay fees for ????: fee limit exceeded", str(context.exception)
+        )
+
+    @aioresponses()
+    async def test_refusal_text_with_raw_bytes_still_reads_as_sequence_mismatch_and_halted_denom(self, mock_api):
+        self._mock_account(mock_api, sequence=3)
+        self._mock_account(mock_api, sequence=4)
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "100000"}}, repeat=True)
+        mock_api.post(self.broadcast_url, payload={"tx_response": {
+            "code": 32, "codespace": "sdk", "raw_log": "\x01\ufffd account sequence mismatch, expected 4, got 3: incorrect account sequence",
+        }})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {
+            "code": 1, "codespace": "x", "raw_log": "market \x02ubze/uusdc is halted: denom is halted\x00", "txhash": "",
+        }})
+
+        with self.assertRaises(BeezeeTxRefusedError) as context:
+            await self.data_source.simulate_sign_and_broadcast(self.messages)
+
+        # The mismatch was retried once; the halted market is still recognised by its text.
+        self.assertEqual(2, len(self._request_bodies(mock_api, self.broadcast_url)))
+        self.assertTrue(context.exception.is_denom_halted)
+        self.assertEqual("market ?ubze/uusdc is halted: denom is halted?", context.exception.chain_message)
 
     @aioresponses()
     async def test_queued_message_gas_follows_the_chains_scan_param_and_market_id_length(self, mock_api):
@@ -318,8 +379,8 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
             sequence=4,
             messages=self.messages,
             fee_denom="ubze",
-            fee_amount="1300",
-            gas_limit=130000,
+            fee_amount="1600",
+            gas_limit=160000,
         )
         self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
 
@@ -422,8 +483,8 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
             sequence=3,
             messages=self.messages,
             fee_denom="ubze",
-            fee_amount="1300",
-            gas_limit=130000,
+            fee_amount="1600",
+            gas_limit=160000,
         )
         self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
 
@@ -431,12 +492,12 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_gas_fees_paid_counts_only_txs_accepted_at_broadcast(self, mock_api):
         self._mock_account(mock_api, sequence=3)
         self._mock_account(mock_api, sequence=3)
-        # gas limit = ceil(100000 * 1.3) = 130000; fee = 1300 ubze, then ceil(200000 * 1.3) * 0.01 = 2600 ubze.
+        # gas limit = ceil(100000 * 1.3) + 30000 = 160000; fee = 1600 ubze, then (ceil(200000 * 1.3) + 30000) * 0.01 = 2900 ubze.
         mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "100000"}})
         mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "100000"}})
         mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "200000"}})
         mock_api.post(self.broadcast_url, payload={"tx_response": {
-            "code": 5, "codespace": "sdk", "raw_log": "spendable balance 0ubze is smaller than 1300ubze: insufficient funds", "txhash": "",
+            "code": 5, "codespace": "sdk", "raw_log": "spendable balance 0ubze is smaller than 1600ubze: insufficient funds", "txhash": "",
         }})
         mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "AA" * 32}})
         mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "BB" * 32}})
@@ -446,9 +507,9 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
             await self.data_source.simulate_sign_and_broadcast(self.messages)
         self.assertEqual(Decimal("0"), self.data_source.gas_fees_paid)
         await self.data_source.simulate_sign_and_broadcast(self.messages)
-        self.assertEqual(Decimal("0.0013"), self.data_source.gas_fees_paid)
+        self.assertEqual(Decimal("0.0016"), self.data_source.gas_fees_paid)
         await self.data_source.simulate_sign_and_broadcast(self.messages)
-        self.assertEqual(Decimal("0.0039"), self.data_source.gas_fees_paid)
+        self.assertEqual(Decimal("0.0045"), self.data_source.gas_fees_paid)
 
     @aioresponses()
     async def test_refused_broadcast_resets_the_sequence(self, mock_api):
@@ -457,7 +518,7 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
         self._mock_account(mock_api, sequence=3)
         mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "100000"}}, repeat=True)
         mock_api.post(self.broadcast_url, payload={"tx_response": {
-            "code": 5, "codespace": "sdk", "raw_log": "spendable balance 0ubze is smaller than 1300ubze: insufficient funds", "txhash": "",
+            "code": 5, "codespace": "sdk", "raw_log": "spendable balance 0ubze is smaller than 1600ubze: insufficient funds", "txhash": "",
         }})
         mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "AA" * 32}})
 
@@ -474,7 +535,7 @@ class BeezeeAPIDataSourceHttpTests(unittest.IsolatedAsyncioTestCase):
             sequence=3,
             messages=self.messages,
             fee_denom="ubze",
-            fee_amount="1300",
-            gas_limit=130000,
+            fee_amount="1600",
+            gas_limit=160000,
         )
         self.assertEqual([build_broadcast_request(signed_at_3)] * 2, self._request_bodies(mock_api, self.broadcast_url))

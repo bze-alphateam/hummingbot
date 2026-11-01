@@ -172,8 +172,9 @@ Notes:
 ## Gas and fees
 
 - Before every broadcast the connector simulates the tx (`/cosmos/tx/v1beta1/simulate`). The gas limit is
-  `ceil(gas_used * gas_adjustment)` plus a queue extra, and the fee is `ceil(gas_limit * gas_price)` in the native
-  denom.
+  `ceil(gas_used * gas_adjustment)` plus a queue extra plus a fixed 30,000 for the fee deduction, and the fee is
+  `ceil(gas_limit * gas_price)` in the native denom. The simulation runs with a zero fee, so the chain skips the fee
+  deduction there (a bank transfer, plus the feegrant use in delegated mode); it costs about 18,000 gas in the real tx.
 - Queue extra: in a block, each create pays tradebin's `orderBookQueueMessageScanExtraGas` (5000) plus store reads for
   every message queued before it on its market. The simulation runs on committed state and cannot see them, so each
   create gets that gas added once per message of this account on the same market whose tx is not in a block yet.

@@ -894,6 +894,8 @@ class BeezeeMaxMessagesPerTxTests(BeezeeBatchingTestCase):
 BZE_USDC_QUEUED_MESSAGE_GAS = 6068
 # The fake node simulates 80000 gas per message; with gas adjustment 1.3:
 CREATE_GAS = 104000
+# Every tx's gas limit also covers the fee deduction, which the zero-fee simulation skips.
+FEE_DEDUCTION_GAS = 30000
 
 
 class BeezeeQueuedAheadGasTests(BeezeeBatchingTestCase):
@@ -910,6 +912,10 @@ class BeezeeQueuedAheadGasTests(BeezeeBatchingTestCase):
 
     def _gas_limits(self) -> List[int]:
         return [sent.gas_limit for _, sent in self.node.landed]
+
+    def _adjusted_gas(self) -> List[int]:
+        """The gas limits less the fixed fee deduction gas every tx carries."""
+        return [gas_limit - FEE_DEDUCTION_GAS for gas_limit in self._gas_limits()]
 
     async def test_creates_pay_for_the_accounts_messages_queued_ahead_on_their_market(self):
         self.node.block_gate = asyncio.get_event_loop().create_future()
@@ -930,7 +936,7 @@ class BeezeeQueuedAheadGasTests(BeezeeBatchingTestCase):
                 CREATE_GAS,
                 2 * CREATE_GAS + 2 * 2 * BZE_USDC_QUEUED_MESSAGE_GAS,
             ],
-            self._gas_limits(),
+            self._adjusted_gas(),
         )
 
         # Once their txs are in a block, the queue is executed at that block's end: nothing is ahead any more.
@@ -938,7 +944,7 @@ class BeezeeQueuedAheadGasTests(BeezeeBatchingTestCase):
         await self._run_until(lambda: not self.exchange._queued_creates, "outcomes not read")
         await self._send_alone(lambda: self.exchange.buy("BZE-USDC", Decimal("13"), OrderType.LIMIT, Decimal("0.0002")))
 
-        self.assertEqual(CREATE_GAS, self._gas_limits()[-1])
+        self.assertEqual(CREATE_GAS, self._adjusted_gas()[-1])
 
     async def test_a_message_whose_tx_is_in_a_block_is_not_ahead_even_before_its_outcome_is_read(self):
         def unsaved(client_order_id: str, tx_hash: str) -> InFlightOrder:
@@ -963,7 +969,7 @@ class BeezeeQueuedAheadGasTests(BeezeeBatchingTestCase):
 
         await self._send_alone(lambda: self.exchange.buy("BZE-USDC", Decimal("10"), OrderType.LIMIT, Decimal("0.0003")))
 
-        self.assertEqual([CREATE_GAS + BZE_USDC_QUEUED_MESSAGE_GAS], self._gas_limits())
+        self.assertEqual([CREATE_GAS + BZE_USDC_QUEUED_MESSAGE_GAS], self._adjusted_gas())
         self.node.block_gate.set_result(None)
 
     async def test_a_queued_cancel_counts_ahead_of_a_create_but_a_cancel_pays_nothing_extra(self):
@@ -977,6 +983,6 @@ class BeezeeQueuedAheadGasTests(BeezeeBatchingTestCase):
         self.assertEqual(["create", "cancel", "create"], [sent.kinds[0] for _, sent in self.node.landed])
         self.assertEqual(
             [CREATE_GAS, CREATE_GAS, CREATE_GAS + 2 * BZE_USDC_QUEUED_MESSAGE_GAS],
-            self._gas_limits(),
+            self._adjusted_gas(),
         )
         self.node.block_gate.set_result(None)

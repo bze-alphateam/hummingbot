@@ -216,12 +216,12 @@ bzed tx feegrant grant "$GRANTER" "$BOT" --spend-limit="$SPEND" --period=86400 -
 
 `bzed tx feegrant grant` takes the granter as its first argument and ignores `--from`.
 
-**Sizing the limits.** Each bot tx pays its gas limit (the simulated gas times `gas_adjustment`, 1.3 by default) times
-the gas price, 0.01 ubze on testnet. A tx with one order is about 130,000 gas, i.e. about 0.0013 BZE; a batch with more
-orders costs more, but much less than one tx per order. Run the bot for an hour, then read the gas it paid: the beezee
-scripts print it in `status` (the gas on their spend or fees line); for a plain strategy, add up the fees of the
-wallet's recent txs in the explorer (the wallet is their fee payer). Scale that to a day and set `DAILY` to about twice
-it, and `SPEND` to `DAILY` times the days until the expiry. Both are in ubze (1 BZE = 1,000,000 ubze). A spent limit
+**Sizing the limits.** Each bot tx pays its gas limit (the simulated gas times `gas_adjustment`, 1.3 by default, plus
+30,000 for the fee deduction the simulation skips) times the gas price, 0.01 ubze on testnet. A tx with one order is
+about 160,000 gas, i.e. about 0.0016 BZE; a batch with more orders costs more, but much less than one tx per order.
+Run the bot for an hour, then read the gas it paid: the beezee scripts print it in `status` (the gas on their spend or
+fees line); for a plain strategy, add up the fees of the wallet's recent txs in the explorer (the wallet is their fee
+payer). Scale that to a day and set `DAILY` to about twice it, and `SPEND` to `DAILY` times the days until the expiry. Both are in ubze (1 BZE = 1,000,000 ubze). A spent limit
 only stops the bot (see "When grants are revoked, expire or run out"); it never costs more than the limit.
 
 **Renewing.** Running the authz grant again for a type replaces that grant, with the new expiry. A feegrant allowance

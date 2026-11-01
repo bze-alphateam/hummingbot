@@ -164,8 +164,8 @@ class BeezeeSwapTests(BeezeeSwapTestCase):
             (message.kind, message.routes, message.input_denom, message.amount, message.min_output_denom, message.min_output),
         )
         self.assertEqual(f"hbot-swap:{order_id}", sent.memo)
-        # Gas from the simulation with the usual adjustment.
-        self.assertEqual(195000, sent.gas_limit)
+        # Gas from the simulation with the usual adjustment, plus the fee deduction gas.
+        self.assertEqual(225000, sent.gas_limit)
         # Reported before the pool fee (0.006 USDC), which is booked as a fee next to the tradebin taker fee.
         base = paid * MICRO
         quote = Decimal("1.994")

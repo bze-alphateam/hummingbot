@@ -386,6 +386,25 @@ class BeezeeDelegationRefusalTests(BeezeeDelegationTestCase):
 
         self._assert_stopped("no allowance")
 
+    async def test_refusal_text_with_raw_address_bytes_stops_trading_with_a_printable_message(self):
+        # The feegrant error embeds the raw granter and grantee address bytes.
+        await self._status_update()
+        self.simulation_refusal = (
+            "failed to execute message; message index: 0: \x14\ufffd\x03k does not allow to pay fees for \x01\ufffd: "
+            "fee limit exceeded"
+        )
+
+        order_id = await self._place_and_fail()
+        await self._run_until(lambda: self._grant_reads() == 2, "no re-check after the refusal")
+
+        self._assert_stopped("fee limit exceeded")
+        [stopped] = [record.getMessage() for record in self.log_records if STOPPED_LOG in record.getMessage()]
+        [failure] = [event.error_message for event in self.events[MarketEvent.OrderFailure].event_log if event.order_id == order_id]
+        for message in (stopped, failure, self.exchange.delegation_status):
+            self.assertTrue(message.isprintable(), repr(message))
+        self.assertIn("???k does not allow to pay fees for ??: fee limit exceeded", stopped)
+        self.assertIn("???k does not allow to pay fees for ??: fee limit exceeded", failure)
+
     async def test_status_update_while_the_first_re_check_runs_after_a_refusal_before_any_check(self):
         # The refusal comes before the first status update, and its re-check is still reading when the next status
         # update runs: the update must read the grants itself, not fail on a check time that was never set.
