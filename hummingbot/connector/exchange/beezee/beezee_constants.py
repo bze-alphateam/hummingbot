@@ -93,6 +93,11 @@ DEFAULT_BLOCK_STREAM_TIMEOUT = 20.0
 # Mainnet public-node minimum gas price (ubze per gas unit) on chain v8.2.0.
 DEFAULT_GAS_PRICE = Decimal("0.01")
 DEFAULT_GAS_ADJUSTMENT = Decimal("1.3")
+# Added to every gas limit. Simulation runs with a zero fee, so the chain's fee decorator skips the fee deduction (a bank
+# transfer, plus feegrant `UseGrantedFees` in delegated mode), which costs about 18k gas in the real tx. Measured on
+# bzetestnet-3 (v8.2.0): a wallet-mode single MsgCancelOrder simulated 58,345 gas, got limit 75,849 and used 76,172
+# (out of gas); a delegated single cancel simulated about 78,455, got limit 101,992 and used 97,012.
+FEE_DEDUCTION_GAS = 30000
 # Simulation runs against the last committed state, where the tradebin queue is empty. In a block, every create pays
 # extra gas for each message already queued on its market: the tradebin `orderBookQueueMessageScanExtraGas` param
 # plus the store reads of that message (SDK KV gas: a flat cost per iterator step and a cost per key and value byte).

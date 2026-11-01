@@ -270,10 +270,11 @@ class BeezeeDelegatedDataSourceTests(unittest.IsolatedAsyncioTestCase):
             [build_simulate_request(build_simulation_transaction(self.bot.public_key_bytes, 4, wrapped, memo="hbot:OID1", fee_granter=ADDRESS))],
             self._request_bodies(mock_api, self.simulate_url),
         )
-        # gas limit = ceil(100001 * 1.3) = 130002; fee = ceil(130002 * 0.01) = 1301 ubze, paid through the granter.
+        # gas limit = ceil(100001 * 1.3) + 30000 fee deduction = 160002; fee = ceil(160002 * 0.01) = 1601 ubze, paid
+        # through the granter.
         expected_tx = build_signed_transaction(
             signer=self.bot, chain_id="beezee-1", account_number=9, sequence=4, messages=wrapped, fee_denom="ubze",
-            fee_amount="1301", gas_limit=130002, memo="hbot:OID1", fee_granter=ADDRESS,
+            fee_amount="1601", gas_limit=160002, memo="hbot:OID1", fee_granter=ADDRESS,
         )
         self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
         for call in [*mock_api.requests[("POST", URL(self.simulate_url))], *mock_api.requests[("POST", URL(self.broadcast_url))]]:
@@ -281,7 +282,28 @@ class BeezeeDelegatedDataSourceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(([MSG_EXEC], BOT_ADDRESS, ADDRESS), (sent.outer_types, sent.exec_grantee, sent.fee_granter))
             self.assertEqual(["cancel", "create", "swap", "fill"], sent.kinds)
             self.assertEqual(4, sent.sequence)
-        self.assertEqual(Decimal("0.001301"), self.data_source.gas_fees_paid)
+        self.assertEqual(Decimal("0.001601"), self.data_source.gas_fees_paid)
+
+    @aioresponses()
+    async def test_lone_cancel_gas_limit_covers_the_fee_deduction_the_simulation_skips(self, mock_api):
+        # Measured on testnet: a delegated lone cancel simulated about 78,455 gas (zero fee, so neither the fee transfer
+        # nor the feegrant use) and used 97,012 in the real tx, a 5% margin under ceil(78455 * 1.3) = 101,992.
+        mock_api.get(
+            f"{REST_URL}{CONSTANTS.ACCOUNT_INFO_PATH_URL}/{BOT_ADDRESS}",
+            payload={"account": {"account_number": "9", "sequence": "4"}},
+        )
+        mock_api.post(self.simulate_url, payload={"gas_info": {"gas_used": "78455"}})
+        mock_api.post(self.broadcast_url, payload={"tx_response": {"code": 0, "txhash": "AB" * 32}})
+        cancel = self.data_source.cancel_order_message("ubze/uusdc", "sell", "000000000000000000000042")
+
+        await self.data_source.broadcast_cancel_order("ubze/uusdc", "sell", "000000000000000000000042")
+
+        # gas limit = 101992 + 30000 = 131992; fee = ceil(131992 * 0.01) = 1320 ubze, paid through the granter.
+        expected_tx = build_signed_transaction(
+            signer=self.bot, chain_id="beezee-1", account_number=9, sequence=4, messages=[msg_exec(BOT_ADDRESS, [cancel])],
+            fee_denom="ubze", fee_amount="1320", gas_limit=131992, fee_granter=ADDRESS,
+        )
+        self.assertEqual([build_broadcast_request(expected_tx)], self._request_bodies(mock_api, self.broadcast_url))
 
     @aioresponses()
     async def test_balances_dust_and_open_orders_are_read_for_the_granter(self, mock_api):
