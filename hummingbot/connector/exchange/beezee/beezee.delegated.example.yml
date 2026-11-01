@@ -1,0 +1,38 @@
+# Example Beezee connector configuration for delegated trading (README_BZE.md, "Delegated trading").
+# The funds stay in the user's wallet (granter_address). A separate bot key with no funds signs: it sends the wallet's
+# tradebin messages in an authz MsgExec, and the wallet's feegrant allowance pays the gas. The wallet must have granted
+# the four tradebin authz grants and a feegrant allowance for /cosmos.authz.v1beta1.MsgExec to the bot key first.
+# Secure values (the bot key's private key or mnemonic) should be entered through `connect beezee` so Hummingbot can
+# encrypt them when persisting the connector config.
+
+connector: beezee
+receive_connector_configuration: true
+
+network:
+  rest_endpoint: "https://testnet.getbze.com"
+  rpc_endpoint: "https://testnet-rpc.getbze.com"
+  websocket_endpoint: "wss://testnet-rpc.getbze.com/websocket"
+  chain_id: "bzetestnet-3"
+  address_prefix: "bze"
+  native_denom: "ubze"
+  gas_price: "0.01"
+  gas_adjustment: "1.3"
+
+batch_window_ms: 300
+max_messages_per_tx: 25
+
+account_type:
+  name: "delegated_mnemonic"
+  mnemonic: "replace with the bot key's 12 or 24 word mnemonic"
+  passphrase: ""
+  hd_path: "m/44'/118'/0'/0/0"
+  # The user's wallet: it owns the funds, the orders and the fills, and pays the gas through its feegrant allowance.
+  # Never the bot key's own address.
+  granter_address: "bze1<user>..."
+
+# Alternative, with the bot key as a hex private key:
+#
+# account_type:
+#   name: "delegated"
+#   private_key: "replace with the bot key's 32-byte hex private key"
+#   granter_address: "bze1<user>..."
