@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 from aioresponses import aioresponses
 
+from hummingbot.client.settings import AllConnectorSettings
 from hummingbot.connector.exchange.beezee import beezee_constants as CONSTANTS
 from hummingbot.connector.exchange.beezee.beezee_api_data_source import BeezeeTxRefusedError
 from hummingbot.connector.exchange.beezee.beezee_exchange import BeezeeExchange
@@ -25,6 +26,7 @@ from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
 from hummingbot.core.data_type.trade_fee import TokenAmount
 from hummingbot.core.event.event_logger import EventLogger
 from hummingbot.core.event.events import MarketEvent
+from hummingbot.core.utils.estimate_fee import build_trade_fee
 
 
 async def no_wait(_delay: float):
@@ -261,6 +263,26 @@ class BeezeeExchangeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([TokenAmount("BZE", Decimal("0.1"))], taker_fee.flat_fees)
         self.assertEqual([TokenAmount("BZE", Decimal("0.001"))], maker_fee.flat_fees)
+
+    async def test_budget_checker_fee_token_is_the_chain_label(self):
+        # OrderCandidate prices fees from the connector's fee schema; the static one says BZE, a testnet labels ubze TBZE.
+        settings = AllConnectorSettings.get_connector_settings()["beezee"]
+        schema = settings.trade_fee_schema
+        saved = (schema.maker_fixed_fees, schema.taker_fixed_fees)
+        self.addCleanup(lambda: (setattr(schema, "maker_fixed_fees", saved[0]), setattr(schema, "taker_fixed_fees", saved[1])))
+        data_source = Mock()
+        data_source.get_trade_fees = AsyncMock(return_value={
+            "maker": TokenAmount("TBZE", Decimal("0.001")), "taker": TokenAmount("TBZE", Decimal("0.1")),
+        })
+        self.exchange._data_source = data_source
+
+        await self.exchange._update_trading_fees()
+        fee_args = (OrderType.LIMIT, TradeType.BUY, Decimal("1"), Decimal("2.5"))
+        maker = build_trade_fee("beezee", True, "TBZE", "TUSDC", *fee_args)
+        taker = build_trade_fee("beezee", False, "TBZE", "TUSDC", *fee_args)
+
+        self.assertEqual([TokenAmount("TBZE", Decimal("0.001"))], maker.flat_fees)
+        self.assertEqual([TokenAmount("TBZE", Decimal("0.1"))], taker.flat_fees)
 
     async def test_place_order_refuses_halted_pair_before_signing(self):
         data_source = self._halt_data_source([{"uusdc"}])
