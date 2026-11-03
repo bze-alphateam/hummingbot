@@ -1419,6 +1419,7 @@ class BeezeeExchange(ExchangePyBase):
         self._pairs_by_trading_pair = dict(pairs)
         self._markets_by_trading_pair = {name: pair.market for name, pair in pairs.items() if pair.market is not None}
         self._trade_fees = await data_source.get_trade_fees()
+        self._publish_fees_to_budget_checker()
         await self._check_trading_pair_names(data_source)
         return [
             TradingRule(
@@ -1453,6 +1454,20 @@ class BeezeeExchange(ExchangePyBase):
 
     async def _update_trading_fees(self):
         self._trade_fees = await self._build_data_source().get_trade_fees()
+        self._publish_fees_to_budget_checker()
+
+    def _publish_fees_to_budget_checker(self):
+        """Puts the chain's flat fees into the connector's fee schema.
+
+        Hummingbot's `OrderCandidate` (the budget checker of scripts and controllers) prices an order's fee from that
+        schema and never calls `_get_fee`. The static schema names the fee token `BZE`, which is not the label of
+        `ubze` on a testnet (`TBZE`): the fee then needs a balance that does not exist, and every order is cut to 0.
+        """
+        from hummingbot.client.settings import AllConnectorSettings
+
+        schema = AllConnectorSettings.get_connector_settings()[self.name].trade_fee_schema
+        schema.maker_fixed_fees = [self._trade_fees["maker"]] if self._trade_fees.get("maker") else []
+        schema.taker_fixed_fees = [self._trade_fees["taker"]] if self._trade_fees.get("taker") else []
 
     async def stop_network(self):
         await super().stop_network()
